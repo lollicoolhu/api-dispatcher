@@ -1,12 +1,35 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
 const PORT = 3000;
 let baseFolder = process.argv[2] || 'cash';
 let accessLogs = [];
-let tempOverrides = {}; // 临时修改的返回值 { path: content }
 const MAX_LOGS = 1000;
+
+const DATA_FILE = path.join(__dirname, '.mock-server-data.json');
+let tempOverrides = {};
+let urlMappings = {}; // 改名为映射
+
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      tempOverrides = data.tempOverrides || {};
+      urlMappings = data.urlMappings || data.proxyMappings || {};
+      console.log('Loaded ' + Object.keys(tempOverrides).length + ' overrides, ' + Object.keys(urlMappings).length + ' mappings');
+    }
+  } catch (e) { console.error('Failed to load data:', e.message); }
+}
+
+function saveData() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ tempOverrides, urlMappings }, null, 2));
+  } catch (e) { console.error('Failed to save data:', e.message); }
+}
+
+loadData();
 
 const adminHtml = `
 <!DOCTYPE html>
@@ -32,6 +55,7 @@ const adminHtml = `
     .btn-secondary { background: #6c757d; color: #fff; }
     .btn-danger { background: #dc3545; color: #fff; }
     .btn-warning { background: #ffc107; color: #000; }
+    .btn-info { background: #17a2b8; color: #fff; }
     .btn:hover { opacity: 0.9; }
     .status { margin: 15px 0; padding: 12px; background: #f0f0f0; border-radius: 4px; }
     .upload-area { border: 2px dashed #ccc; padding: 30px; text-align: center; border-radius: 8px; cursor: pointer; margin-bottom: 15px; }
@@ -40,7 +64,7 @@ const adminHtml = `
     .stats span { margin-right: 12px; }
     .main-layout { display: flex; gap: 15px; }
     .list-panel { flex: 1; min-width: 0; }
-    .detail-panel { width: 600px; background: #f8f9fa; border-radius: 8px; padding: 12px; display: none; max-height: 600px; overflow-y: auto; }
+    .detail-panel { width: 650px; background: #f8f9fa; border-radius: 8px; padding: 12px; display: none; max-height: 600px; overflow-y: auto; }
     .detail-panel.active { display: block; }
     .group-header { background: #e9ecef; padding: 8px 12px; cursor: pointer; border-radius: 4px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
     .group-header:hover { background: #dee2e6; }
@@ -50,6 +74,7 @@ const adminHtml = `
     .badge-merged { background: #28a745; color: #fff; }
     .badge-missing { background: #dc3545; color: #fff; }
     .badge-override { background: #ffc107; color: #000; }
+    .badge-mapping { background: #17a2b8; color: #fff; }
     .group-items { margin-left: 15px; margin-bottom: 8px; display: none; }
     .group-items.expanded { display: block; }
     .item-row { display: flex; align-items: center; padding: 6px 8px; border-bottom: 1px solid #eee; cursor: pointer; gap: 8px; }
@@ -91,22 +116,27 @@ const adminHtml = `
     .log-status { font-size: 11px; }
     .log-status.found { color: #28a745; }
     .log-status.missing { color: #dc3545; }
+    .log-status.mapping { color: #17a2b8; }
     .override-list { margin-top: 15px; }
     .override-item { display: flex; align-items: center; gap: 10px; padding: 8px; background: #fff3cd; border-radius: 4px; margin-bottom: 5px; }
-    .override-item .path { flex: 1; font-family: monospace; font-size: 12px; }
+    .override-item .path { flex: 1; font-family: monospace; font-size: 12px; word-break: break-all; }
+    .mapping-item { display: flex; align-items: center; gap: 10px; padding: 8px; background: #d1ecf1; border-radius: 4px; margin-bottom: 5px; }
+    .mapping-item .path { font-family: monospace; font-size: 12px; min-width: 180px; }
+    .mapping-item .target { flex: 1; font-family: monospace; font-size: 11px; color: #0c5460; word-break: break-all; }
     .file-item { padding: 6px 10px; border-bottom: 1px solid #eee; cursor: pointer; font-family: monospace; font-size: 12px; }
     .file-item:hover { background: #f8f9fa; }
     .file-item.active { background: #e3f2fd; }
-    /* Modal */
     .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
     .modal.active { display: flex; align-items: center; justify-content: center; }
-    .modal-content { background: #fff; border-radius: 8px; width: 800px; max-width: 90%; max-height: 90%; display: flex; flex-direction: column; }
+    .modal-content { background: #fff; border-radius: 8px; width: 900px; max-width: 95%; max-height: 90%; display: flex; flex-direction: column; }
     .modal-header { padding: 15px 20px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
     .modal-header h3 { margin: 0; font-size: 16px; }
     .modal-body { padding: 20px; flex: 1; overflow: auto; }
     .modal-footer { padding: 15px 20px; border-top: 1px solid #ddd; display: flex; gap: 10px; justify-content: flex-end; }
-    .json-editor { width: 100%; height: 400px; font-family: monospace; font-size: 12px; border: 1px solid #ddd; border-radius: 4px; padding: 10px; resize: vertical; }
+    .json-editor { width: 100%; height: 350px; font-family: monospace; font-size: 12px; border: 1px solid #ddd; border-radius: 4px; padding: 10px; resize: vertical; }
     .json-error { color: #dc3545; font-size: 12px; margin-top: 5px; }
+    .test-result { margin-top: 15px; padding: 12px; background: #f8f9fa; border-radius: 4px; }
+    .test-result .detail-tabs { margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -120,7 +150,10 @@ const adminHtml = `
     </div>
 
     <div id="settings" class="panel active">
-      <div class="status">当前服务文件夹: <strong id="current"></strong></div>
+      <div class="status">
+        <div>服务器地址: <strong id="serverAddrs"></strong></div>
+        <div style="margin-top:8px">当前服务文件夹: <strong id="current"></strong></div>
+      </div>
       <div style="margin:15px 0">
         <label>切换服务文件夹: <input type="text" id="folder" placeholder="文件夹名称" style="width:250px"></label>
         <button class="btn btn-primary" onclick="changeFolder()">确认</button>
@@ -128,6 +161,10 @@ const adminHtml = `
       <div class="override-list">
         <h3>临时修改列表 <span id="overrideCount">(0)</span></h3>
         <div id="overrideList"></div>
+      </div>
+      <div class="override-list" style="margin-top:20px">
+        <h3>URL映射列表 <span id="mappingCount">(0)</span></h3>
+        <div id="mappingList"></div>
       </div>
     </div>
 
@@ -139,9 +176,7 @@ const adminHtml = `
       </div>
       <div class="stats"><span>文件数: <strong id="fileCount">0</strong></span><span id="parseFolderInfo"></span></div>
       <div class="main-layout">
-        <div class="list-panel">
-          <div class="list-container" id="fileList" style="max-height:500px"></div>
-        </div>
+        <div class="list-panel"><div class="list-container" id="fileList" style="max-height:500px"></div></div>
         <div class="detail-panel" id="fileDetailPanel"></div>
       </div>
     </div>
@@ -189,7 +224,8 @@ const adminHtml = `
         <input type="text" id="logSearch" placeholder="搜索路径..." style="width:180px" oninput="renderLogs()">
         <select id="logStatusFilter" onchange="renderLogs()">
           <option value="">全部</option>
-          <option value="found">已存在</option>
+          <option value="found">本地</option>
+          <option value="mapping">映射</option>
           <option value="missing">不存在</option>
         </select>
         <label><input type="checkbox" id="logGroupMissing" onchange="renderLogs()"> 不存在接口分组</label>
@@ -205,9 +241,7 @@ const adminHtml = `
       </div>
       <div class="stats"><span>日志数: <strong id="logCount">0</strong></span></div>
       <div class="main-layout">
-        <div class="list-panel">
-          <div class="list-container" id="logList" style="max-height:500px"></div>
-        </div>
+        <div class="list-panel"><div class="list-container" id="logList" style="max-height:500px"></div></div>
         <div class="detail-panel" id="logDetailPanel"></div>
       </div>
     </div>
@@ -233,18 +267,50 @@ const adminHtml = `
     </div>
   </div>
 
+  <!-- Mapping Modal -->
+  <div class="modal" id="mappingModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>设置URL映射</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeMappingModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">接口路径:</label>
+          <input type="text" id="mappingPath" style="width:100%" readonly>
+        </div>
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">映射目标地址 (完整URL):</label>
+          <input type="text" id="mappingTarget" placeholder="https://api.example.com" style="width:100%">
+        </div>
+        <div style="margin-bottom:10px">
+          <button class="btn btn-info" onclick="testMapping()">测试连通</button>
+        </div>
+        <div id="mappingTestResult" class="test-result hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeMappingModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveMappingFromModal()">保存映射</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
     let logs = [], expandedMissingGroups = new Set(), activeLogIdx = null, logDetailTab = 'response', logRefreshTimer = null;
-    let localFiles = [], activeFilePath = null, overrides = {}, currentParseFolder = '';
-    let modalCallback = null;
+    let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, currentParseFolder = '';
+    let modalCallback = null, mappingTestTab = 'response';
     
     fetch('/admin/folder').then(r=>r.json()).then(d=>{
       document.getElementById('current').textContent=d.folder;
       document.getElementById('folder').value = localStorage.getItem('lastFolder') || '';
       document.getElementById('parseFolder').value = localStorage.getItem('lastParseFolder') || d.folder;
     });
+    fetch('/admin/server-info').then(r=>r.json()).then(d=>{
+      document.getElementById('serverAddrs').innerHTML = d.addresses.map(a => '<a href="'+a+'/admin" target="_blank" style="margin-right:10px">'+a+'</a>').join('');
+    });
     loadOverrides();
+    loadMappings();
     
     function showTab(name) {
       document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
@@ -262,22 +328,16 @@ const adminHtml = `
         logRefreshTimer = setInterval(refreshLogs, interval);
       }
     }
-    
     function stopAutoRefresh() {
       if (logRefreshTimer) { clearInterval(logRefreshTimer); logRefreshTimer = null; }
       document.getElementById('logAutoRefresh').checked = false;
     }
-    
     function toggleAutoRefresh() {
       if (document.getElementById('logAutoRefresh').checked) startAutoRefresh();
       else stopAutoRefresh();
     }
-    
     function updateRefreshInterval() { stopAutoRefresh(); document.getElementById('logAutoRefresh').checked = true; startAutoRefresh(); }
-    
-    document.getElementById('logList').addEventListener('scroll', function() {
-      if (this.scrollTop > 50) stopAutoRefresh();
-    });
+    document.getElementById('logList').addEventListener('scroll', function() { if (this.scrollTop > 50) stopAutoRefresh(); });
     
     function changeFolder() {
       const folder = document.getElementById('folder').value;
@@ -289,6 +349,74 @@ const adminHtml = `
         });
     }
 
+    // Mappings
+    async function loadMappings() {
+      const res = await fetch('/admin/mappings');
+      mappings = await res.json();
+      renderMappings();
+    }
+    function renderMappings() {
+      const list = document.getElementById('mappingList');
+      const paths = Object.keys(mappings);
+      document.getElementById('mappingCount').textContent = '(' + paths.length + ')';
+      if (paths.length === 0) { list.innerHTML = '<em>无URL映射</em>'; return; }
+      list.innerHTML = paths.map(p => 
+        '<div class="mapping-item"><span class="path">'+p+'</span><span class="target">→ '+mappings[p]+'</span><button class="btn btn-sm btn-info" onclick="openMappingModal(\\''+p.replace(/'/g, "\\\\'")+'\\')">编辑</button><button class="btn btn-sm btn-danger" onclick="removeMapping(\\''+p.replace(/'/g, "\\\\'")+'\\')">删除</button></div>'
+      ).join('');
+    }
+    async function removeMapping(apiPath) {
+      await fetch('/admin/mappings', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path: apiPath}) });
+      loadMappings();
+    }
+    function openMappingModal(apiPath) {
+      document.getElementById('mappingPath').value = apiPath;
+      document.getElementById('mappingTarget').value = mappings[apiPath] || '';
+      document.getElementById('mappingTestResult').classList.add('hidden');
+      document.getElementById('mappingModal').classList.add('active');
+    }
+    function closeMappingModal() {
+      document.getElementById('mappingModal').classList.remove('active');
+    }
+    async function saveMappingFromModal() {
+      const apiPath = document.getElementById('mappingPath').value;
+      const target = document.getElementById('mappingTarget').value.trim();
+      if (!target) return alert('请输入映射目标地址');
+      await fetch('/admin/mappings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path: apiPath, target}) });
+      loadMappings();
+      closeMappingModal();
+      if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+    }
+    async function testMapping() {
+      const apiPath = document.getElementById('mappingPath').value;
+      const target = document.getElementById('mappingTarget').value.trim();
+      if (!target) return alert('请输入映射目标地址');
+      const resultDiv = document.getElementById('mappingTestResult');
+      resultDiv.innerHTML = '<em>测试中...</em>';
+      resultDiv.classList.remove('hidden');
+      try {
+        const res = await fetch('/admin/test-mapping', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path: apiPath, target}) });
+        const data = await res.json();
+        renderMappingTestResult(data);
+      } catch (e) {
+        resultDiv.innerHTML = '<span style="color:#dc3545">测试失败: ' + e.message + '</span>';
+      }
+    }
+    function renderMappingTestResult(data) {
+      const resultDiv = document.getElementById('mappingTestResult');
+      const tabBtn = (name, label) => '<button class="detail-tab'+(mappingTestTab===name?' active':'')+'" onclick="switchMappingTestTab(\\''+name+'\\')">'+label+'</button>';
+      const headerTable = (headers) => { if (!headers || Object.keys(headers).length === 0) return '<em>无</em>'; return '<table>'+Object.entries(headers).map(([k,v]) => '<tr><td>'+k+'</td><td>'+v+'</td></tr>').join('')+'</table>'; };
+      let body = data.body || '';
+      try { body = JSON.stringify(JSON.parse(body), null, 2); } catch {}
+      const statusClass = data.status >= 200 && data.status < 300 ? 'status-2xx' : data.status >= 400 && data.status < 500 ? 'status-4xx' : 'status-5xx';
+      resultDiv.innerHTML = 
+        '<div class="meta-row"><div class="meta-item">状态: <span class="status-code '+statusClass+'">'+data.status+'</span></div><div class="meta-item">耗时: '+data.time+'ms</div><div class="meta-item">大小: '+formatSize(data.size)+'</div></div>'+
+        '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;color:#666;word-break:break-all">'+data.url+'</div>'+
+        '<div class="detail-tabs">'+tabBtn('response','Response')+tabBtn('headers','Headers')+'</div>'+
+        '<div class="tab-content'+(mappingTestTab==='response'?' active':'')+'"><div class="detail-content" style="max-height:200px"><pre>'+escapeHtml(body)+'</pre></div></div>'+
+        '<div class="tab-content'+(mappingTestTab==='headers'?' active':'')+'"><div class="detail-content" style="max-height:200px">'+headerTable(data.headers)+'</div></div>';
+    }
+    function switchMappingTestTab(tab) { mappingTestTab = tab; testMapping(); }
+
     // Modal
     function openModal(title, path, content, onSave) {
       document.getElementById('modalTitle').textContent = title;
@@ -298,32 +426,16 @@ const adminHtml = `
       modalCallback = onSave;
       document.getElementById('jsonModal').classList.add('active');
     }
-    
-    function closeModal() {
-      document.getElementById('jsonModal').classList.remove('active');
-      modalCallback = null;
-    }
-    
+    function closeModal() { document.getElementById('jsonModal').classList.remove('active'); modalCallback = null; }
     function formatJson() {
       const editor = document.getElementById('jsonEditor');
-      try {
-        const json = JSON.parse(editor.value);
-        editor.value = JSON.stringify(json, null, 2);
-        document.getElementById('jsonError').textContent = '';
-      } catch (e) {
-        document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
-      }
+      try { editor.value = JSON.stringify(JSON.parse(editor.value), null, 2); document.getElementById('jsonError').textContent = ''; }
+      catch (e) { document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message; }
     }
-    
     document.getElementById('modalSaveBtn').onclick = function() {
       const content = document.getElementById('jsonEditor').value;
-      try {
-        JSON.parse(content); // validate
-        if (modalCallback) modalCallback(content);
-        closeModal();
-      } catch (e) {
-        document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
-      }
+      try { JSON.parse(content); if (modalCallback) modalCallback(content); closeModal(); }
+      catch (e) { document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message; }
     };
 
     // Overrides
@@ -332,7 +444,6 @@ const adminHtml = `
       overrides = await res.json();
       renderOverrides();
     }
-    
     function renderOverrides() {
       const list = document.getElementById('overrideList');
       const paths = Object.keys(overrides);
@@ -342,19 +453,16 @@ const adminHtml = `
         '<div class="override-item"><span class="path">'+p+'</span><button class="btn btn-sm btn-primary" onclick="editOverride(\\''+p.replace(/'/g, "\\\\'")+'\\')">编辑</button><button class="btn btn-sm btn-danger" onclick="removeOverride(\\''+p.replace(/'/g, "\\\\'")+'\\')">删除</button></div>'
       ).join('');
     }
-    
     async function removeOverride(path) {
       await fetch('/admin/overrides', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path}) });
       loadOverrides();
     }
-    
     async function editOverride(path) {
       openModal('编辑临时返回值', path, overrides[path] || '', async (content) => {
         await fetch('/admin/overrides', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path, content}) });
         loadOverrides();
       });
     }
-    
     async function setTempOverride(path, originalContent) {
       let content = overrides[path] || originalContent;
       try { content = JSON.stringify(JSON.parse(content), null, 2); } catch {}
@@ -365,7 +473,7 @@ const adminHtml = `
       });
     }
 
-    // Local Files - 解析指定文件夹
+    // Local Files
     async function parseLocalFolder() {
       const folder = document.getElementById('parseFolder').value.trim();
       if (!folder) return alert('请输入文件夹路径');
@@ -381,74 +489,47 @@ const adminHtml = `
       activeFilePath = null;
       filterFiles();
     }
-    
     function filterFiles() {
       const search = document.getElementById('fileSearch').value.toLowerCase();
       const filtered = localFiles.filter(f => !search || f.path.toLowerCase().includes(search));
-      const container = document.getElementById('fileList');
-      container.innerHTML = filtered.map(f => 
+      document.getElementById('fileList').innerHTML = filtered.map(f => 
         '<div class="file-item'+(activeFilePath===f.path?' active':'')+'" onclick="showFileDetail(\\''+f.path.replace(/'/g, "\\\\'")+'\\')">'+f.path+'</div>'
       ).join('');
     }
-    
     async function showFileDetail(filePath) {
       activeFilePath = filePath;
       filterFiles();
       const panel = document.getElementById('fileDetailPanel');
       const file = localFiles.find(f => f.path === filePath);
       if (!file) return;
-      
       let content = file.content;
       try { content = JSON.stringify(JSON.parse(content), null, 2); } catch {}
       const hasOverride = overrides[filePath];
-      
+      const hasMapping = mappings[filePath];
       panel.innerHTML = 
-        '<div class="meta-row"><div class="meta-item">'+filePath+'</div>'+(hasOverride?'<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>':'')+'</div>'+
-        '<div class="detail-content" style="max-height:380px"><pre id="fileContent">'+escapeHtml(content)+'</pre></div>'+
-        '<div style="margin-top:10px">'+
-        '<button class="btn btn-primary" onclick="editLocalFile(\\''+filePath.replace(/'/g, "\\\\'")+'\\')">永久修改</button> '+
-        '<button class="btn btn-warning" onclick="setTempOverrideFromFile(\\''+filePath.replace(/'/g, "\\\\'")+'\\')">临时修改</button>'+
-        (hasOverride?' <button class="btn btn-danger" onclick="removeOverrideAndRefresh(\\''+filePath.replace(/'/g, "\\\\'")+'\\')"">取消临时</button>':'')+
-        '</div>';
+        '<div class="meta-row"><div class="meta-item">'+filePath+'</div>'+(hasOverride?'<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>':'')+(hasMapping?'<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>':'')+'</div>'+
+        '<div class="detail-content" style="max-height:380px"><pre>'+escapeHtml(content)+'</pre></div>'+
+        '<div style="margin-top:10px"><button class="btn btn-primary" onclick="editLocalFile(\\''+filePath.replace(/'/g, "\\\\'")+'\\')">永久修改</button> <button class="btn btn-warning" onclick="setTempOverrideFromFile(\\''+filePath.replace(/'/g, "\\\\'")+'\\')">临时修改</button>'+(hasOverride?' <button class="btn btn-danger" onclick="removeOverrideAndRefresh(\\''+filePath.replace(/'/g, "\\\\'")+'\\')"">取消临时</button>':'')+'</div>';
       panel.classList.add('active');
     }
-    
-    function escapeHtml(str) {
-      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    }
-    
+    function escapeHtml(str) { return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
     function editLocalFile(filePath) {
       const file = localFiles.find(f => f.path === filePath);
       if (!file) return;
       let content = file.content;
       try { content = JSON.stringify(JSON.parse(content), null, 2); } catch {}
-      
       openModal('永久修改文件', filePath, content, async (newContent) => {
-        const res = await fetch('/admin/file/save', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ folder: currentParseFolder, path: filePath, content: newContent })
-        });
+        const res = await fetch('/admin/file/save', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ folder: currentParseFolder, path: filePath, content: newContent }) });
         const result = await res.json();
-        if (result.success) {
-          alert('保存成功');
-          parseLocalFolder(); // 重新加载
-        } else {
-          alert('保存失败: ' + result.error);
-        }
+        if (result.success) { alert('保存成功'); parseLocalFolder(); }
+        else alert('保存失败: ' + result.error);
       });
     }
-    
     function setTempOverrideFromFile(filePath) {
       const file = localFiles.find(f => f.path === filePath);
-      if (!file) return;
-      setTempOverride(filePath, file.content);
+      if (file) setTempOverride(filePath, file.content);
     }
-    
-    async function removeOverrideAndRefresh(path) {
-      await removeOverride(path);
-      showFileDetail(path);
-    }
+    async function removeOverrideAndRefresh(path) { await removeOverride(path); showFileDetail(path); }
 
     // Logs
     async function refreshLogs() {
@@ -457,7 +538,6 @@ const adminHtml = `
       document.getElementById('logCount').textContent = logs.length;
       renderLogs();
     }
-    
     async function clearLogs() {
       if (!confirm('确定清空所有日志?')) return;
       await fetch('/admin/logs', {method:'DELETE'});
@@ -465,24 +545,23 @@ const adminHtml = `
       document.getElementById('logDetailPanel').classList.remove('active');
       refreshLogs();
     }
-    
     function renderLogs() {
       const search = document.getElementById('logSearch').value.toLowerCase();
       const statusFilter = document.getElementById('logStatusFilter').value;
       const groupMissing = document.getElementById('logGroupMissing').checked;
-      
       let filtered = logs.map((l, i) => ({...l, idx: i})).filter(l => {
         if (search && !l.path.toLowerCase().includes(search)) return false;
-        if (statusFilter === 'found' && !l.found) return false;
-        if (statusFilter === 'missing' && l.found) return false;
+        if (statusFilter === 'found' && l.found !== true) return false;
+        if (statusFilter === 'mapping' && l.found !== 'mapping') return false;
+        if (statusFilter === 'missing' && (l.found === true || l.found === 'mapping')) return false;
         return true;
       });
-      
       const container = document.getElementById('logList');
-      
-      if (groupMissing && statusFilter !== 'found') {
+      const getStatusClass = (found) => found === true ? 'found' : found === 'mapping' ? 'mapping' : 'missing';
+      const getStatusText = (found) => found === true ? '✓' : found === 'mapping' ? '⇄' : '404';
+      if (groupMissing && statusFilter !== 'found' && statusFilter !== 'mapping') {
         const missingGroups = {};
-        filtered.forEach(l => { if (!l.found) { if (!missingGroups[l.path]) missingGroups[l.path] = []; missingGroups[l.path].push(l); } });
+        filtered.forEach(l => { if (l.found !== true && l.found !== 'mapping') { if (!missingGroups[l.path]) missingGroups[l.path] = []; missingGroups[l.path].push(l); } });
         let html = '';
         for (const [path, items] of Object.entries(missingGroups)) {
           const expanded = expandedMissingGroups.has(path);
@@ -491,17 +570,16 @@ const adminHtml = `
           items.forEach(l => { html += '<div class="log-item'+(activeLogIdx===l.idx?' active':'')+'" onclick="showLogDetail('+l.idx+')"><span class="log-time">'+l.time+'</span><span class="log-ip">'+l.ip+'</span></div>'; });
           html += '</div>';
         }
-        filtered.filter(l => l.found).forEach(l => {
-          html += '<div class="log-item'+(activeLogIdx===l.idx?' active':'')+'" onclick="showLogDetail('+l.idx+')"><span class="log-time">'+l.time+'</span><span class="log-ip">'+l.ip+'</span><span class="log-path">'+l.path+'</span><span class="log-status found">✓</span></div>';
+        filtered.filter(l => l.found === true || l.found === 'mapping').forEach(l => {
+          html += '<div class="log-item'+(activeLogIdx===l.idx?' active':'')+'" onclick="showLogDetail('+l.idx+')"><span class="log-time">'+l.time+'</span><span class="log-ip">'+l.ip+'</span><span class="log-path">'+l.path+'</span><span class="log-status '+getStatusClass(l.found)+'">'+getStatusText(l.found)+'</span></div>';
         });
         container.innerHTML = html;
       } else {
         container.innerHTML = filtered.map(l => 
-          '<div class="log-item'+(activeLogIdx===l.idx?' active':'')+'" onclick="showLogDetail('+l.idx+')"><span class="log-time">'+l.time+'</span><span class="log-ip">'+l.ip+'</span><span class="log-path">'+l.path+'</span><span class="log-status '+(l.found?'found':'missing')+'">'+(l.found?'✓':'404')+'</span></div>'
+          '<div class="log-item'+(activeLogIdx===l.idx?' active':'')+'" onclick="showLogDetail('+l.idx+')"><span class="log-time">'+l.time+'</span><span class="log-ip">'+l.ip+'</span><span class="log-path">'+l.path+'</span><span class="log-status '+getStatusClass(l.found)+'">'+getStatusText(l.found)+'</span></div>'
         ).join('');
       }
     }
-    
     function toggleMissingGroup(path) { expandedMissingGroups.has(path) ? expandedMissingGroups.delete(path) : expandedMissingGroups.add(path); renderLogs(); }
     function switchLogDetailTab(tab) { logDetailTab = tab; if (activeLogIdx !== null) showLogDetail(activeLogIdx); }
     let logHeadersCollapsed = { req: true, res: true };
@@ -516,40 +594,69 @@ const adminHtml = `
       const queryTable = (query) => { if (!query || Object.keys(query).length === 0) return '<em>无</em>'; return '<table>'+Object.entries(query).map(([k,v]) => '<tr><td>'+k+'</td><td>'+v+'</td></tr>').join('')+'</table>'; };
       const collapsible = (title, content, type) => { const collapsed = logHeadersCollapsed[type]; return '<div style="margin-top:10px"><strong style="cursor:pointer" onclick="toggleLogHeaders(\\''+type+'\\')">'+title+' '+(collapsed?'▶':'▼')+'</strong></div><div class="detail-content" style="'+(collapsed?'display:none;':'')+'max-height:150px">'+content+'</div>'; };
       
-      // 获取当前响应内容
+      const hasOverride = overrides[l.path];
+      const hasMapping = mappings[l.path];
+      const isMissing = l.found !== true && l.found !== 'mapping';
+      const isMapping = l.found === 'mapping';
+      const statusText = l.found === true ? '本地' : l.found === 'mapping' ? '映射' : '404';
+      const statusClass = l.found === true ? 'found' : l.found === 'mapping' ? 'mapping' : 'missing';
+      
+      // 映射请求显示服务器返回的详细信息
+      if (isMapping && l.mappingResponse) {
+        const mr = l.mappingResponse;
+        let body = mr.body || '';
+        try { body = JSON.stringify(JSON.parse(body), null, 2); } catch {}
+        const mrStatusClass = mr.status >= 200 && mr.status < 300 ? 'status-2xx' : mr.status >= 400 && mr.status < 500 ? 'status-4xx' : 'status-5xx';
+        panel.innerHTML = 
+          '<div class="meta-row"><div class="meta-item"><span class="method method-'+(l.method||'GET')+'">'+(l.method||'GET')+'</span></div><div class="meta-item">时间: '+l.time+'</div><div class="meta-item">IP: '+l.ip+'</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div></div>'+
+          '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">请求: '+l.path+'</div>'+
+          '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">映射: '+mr.url+'</div>'+
+          '<div class="meta-row"><div class="meta-item">响应状态: <span class="status-code '+mrStatusClass+'">'+mr.status+'</span></div><div class="meta-item">耗时: '+mr.time+'ms</div><div class="meta-item">大小: '+formatSize(mr.size)+'</div></div>'+
+          '<div class="detail-tabs">'+tabBtn('response','Response')+tabBtn('request','Request')+tabBtn('headers','Headers')+'</div>'+
+          '<div class="tab-content'+(logDetailTab==='response'?' active':'')+'"><div class="detail-content" style="max-height:250px"><pre>'+escapeHtml(body)+'</pre></div></div>'+
+          '<div class="tab-content'+(logDetailTab==='request'?' active':'')+'"><div style="margin-bottom:10px"><strong>请求信息</strong></div><div class="detail-content" style="max-height:100px;margin-bottom:10px"><table><tr><td>方法</td><td>'+(l.method||'GET')+'</td></tr><tr><td>路径</td><td>'+l.path+'</td></tr><tr><td>映射目标</td><td>'+mr.url+'</td></tr><tr><td>访问时间</td><td>'+l.time+'</td></tr><tr><td>客户端IP</td><td>'+l.ip+'</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px">'+queryTable(l.query)+'</div></div>'+
+          '<div class="tab-content'+(logDetailTab==='headers'?' active':'')+'"><div style="margin-bottom:10px"><strong>请求 Headers ('+(l.headers?Object.keys(l.headers).length:0)+')</strong></div><div class="detail-content" style="max-height:120px;margin-bottom:10px">'+headerTable(l.headers)+'</div><div style="margin-bottom:10px"><strong>响应 Headers ('+(mr.headers?Object.keys(mr.headers).length:0)+')</strong></div><div class="detail-content" style="max-height:120px">'+headerTable(mr.headers)+'</div></div>'+
+          '<div style="margin-top:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">取消映射</button></div>';
+        panel.classList.add('active');
+        renderLogs();
+        return;
+      }
+      
+      // 普通请求
       fetch(l.path).then(r => { const resHeaders = {}; r.headers.forEach((v, k) => resHeaders[k] = v); return r.text().then(text => ({ text, resHeaders })); })
         .then(({ text, resHeaders }) => {
           let responseBody; try { responseBody = JSON.stringify(JSON.parse(text), null, 2); } catch { responseBody = text; }
           const respContent = document.getElementById('logResponseContent'); if (respContent) respContent.innerHTML = '<pre>'+escapeHtml(responseBody)+'</pre>';
           const resHeadersEl = document.getElementById('logResHeaders'); if (resHeadersEl) resHeadersEl.innerHTML = headerTable(resHeaders);
-          // 保存原始内容用于编辑
           window.currentLogResponse = text;
         }).catch(() => { const respContent = document.getElementById('logResponseContent'); if (respContent) respContent.innerHTML = '<em>无法加载</em>'; window.currentLogResponse = '{}'; });
       
-      const hasOverride = overrides[l.path];
       panel.innerHTML = 
-        '<div class="meta-row"><div class="meta-item"><span class="method method-'+(l.method||'GET')+'">'+(l.method||'GET')+'</span></div><div class="meta-item">时间: '+l.time+'</div><div class="meta-item">IP: '+l.ip+'</div><div class="meta-item">状态: <span class="log-status '+(l.found?'found':'missing')+'">'+(l.found?'存在':'404')+'</span></div>'+(hasOverride?'<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>':'')+'</div>'+
+        '<div class="meta-row"><div class="meta-item"><span class="method method-'+(l.method||'GET')+'">'+(l.method||'GET')+'</span></div><div class="meta-item">时间: '+l.time+'</div><div class="meta-item">IP: '+l.ip+'</div><div class="meta-item">状态: <span class="log-status '+statusClass+'">'+statusText+'</span></div>'+(hasOverride?'<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>':'')+(hasMapping?'<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>':'')+'</div>'+
         '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">'+(l.fullUrl||l.path)+'</div>'+
         '<div class="detail-tabs">'+tabBtn('response','Response')+tabBtn('request','Request')+'</div>'+
         '<div class="tab-content'+(logDetailTab==='response'?' active':'')+'"><div class="detail-content" id="logResponseContent" style="max-height:200px"><em>加载中...</em></div>'+collapsible('Response Headers', '<div id="logResHeaders"><em>加载中...</em></div>', 'res')+
-        '<div style="margin-top:10px"><button class="btn btn-warning btn-sm" onclick="editLogOverride(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">临时修改返回值</button>'+(hasOverride?' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\\''+l.path.replace(/'/g, "\\\\'")+'\\')"">取消临时修改</button>':'')+'</div></div>'+
+        '<div style="margin-top:10px">'+(isMissing?'<button class="btn btn-success btn-sm" onclick="createMissingFile(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">永久保存</button> ':'')+'<button class="btn btn-warning btn-sm" onclick="editLogOverride(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\\''+l.path.replace(/'/g, "\\\\'")+'\\')">设置映射</button>'+(hasOverride?' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\\''+l.path.replace(/'/g, "\\\\'")+'\\')"">取消临时</button>':'')+(hasMapping?' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\\''+l.path.replace(/'/g, "\\\\'")+'\\')"">取消映射</button>':'')+'</div></div>'+
         '<div class="tab-content'+(logDetailTab==='request'?' active':'')+'"><div style="margin-bottom:10px"><strong>基本信息</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px"><table><tr><td>方法</td><td>'+(l.method||'GET')+'</td></tr><tr><td>路径</td><td>'+l.path+'</td></tr><tr><td>访问时间</td><td>'+l.time+'</td></tr><tr><td>客户端IP</td><td>'+l.ip+'</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px">'+queryTable(l.query)+'</div>'+collapsible('Request Headers ('+(l.headers?Object.keys(l.headers).length:0)+')', headerTable(l.headers), 'req')+'</div>';
       panel.classList.add('active');
       renderLogs();
     }
     
-    function editLogOverride(path) {
-      // 等待响应加载完成
-      setTimeout(() => {
-        const content = window.currentLogResponse || '{}';
-        setTempOverride(path, content);
-      }, 100);
-    }
+    async function removeMappingAndRefreshLog(apiPath) { await removeMapping(apiPath); showLogDetail(activeLogIdx); }
     
-    async function removeOverrideAndRefreshLog(path) {
-      await removeOverride(path);
-      showLogDetail(activeLogIdx);
+    function createMissingFile(apiPath) {
+      const defaultContent = JSON.stringify({ Outcome: "Success", Message: "Success", Data: {} }, null, 2);
+      openModal('创建接口文件 (永久保存)', apiPath, defaultContent, async (content) => {
+        const res = await fetch('/admin/file/create', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: apiPath, content }) });
+        const result = await res.json();
+        if (result.success) { alert('创建成功'); refreshLogs(); }
+        else alert('创建失败: ' + result.error);
+      });
     }
+    function editLogOverride(path) {
+      setTimeout(() => { setTempOverride(path, window.currentLogResponse || '{}'); }, 100);
+    }
+    async function removeOverrideAndRefreshLog(path) { await removeOverride(path); showLogDetail(activeLogIdx); }
 
     // HAR Parser
     const uploadArea = document.getElementById('uploadArea');
@@ -651,7 +758,7 @@ const adminHtml = `
 </html>`;
 
 
-function addLog(req, found) {
+function addLog(req, found, mappingResponse = null) {
   const now = new Date();
   const time = now.toLocaleString('zh-CN', { hour12: false });
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
@@ -659,7 +766,7 @@ function addLog(req, found) {
   const urlObj = new URL(req.url, 'http://localhost');
   const query = {};
   urlObj.searchParams.forEach((v, k) => query[k] = v);
-  accessLogs.unshift({ time, path: urlPath, ip, found, method: req.method, fullUrl: req.url, query, headers: req.headers });
+  accessLogs.unshift({ time, path: urlPath, ip, found, method: req.method, fullUrl: req.url, query, headers: req.headers, mappingResponse });
   if (accessLogs.length > MAX_LOGS) accessLogs.pop();
 }
 
@@ -674,7 +781,7 @@ function getAllFiles(dir, base = '') {
       if (stat.isDirectory()) {
         results = results.concat(getAllFiles(fullPath, relPath));
       } else if (item.endsWith('.json')) {
-        const apiPath = '/' + relPath.replace(/\.json$/, '');
+        const apiPath = '/' + relPath.replace(/\\.json$/, '');
         const content = fs.readFileSync(fullPath, 'utf8');
         results.push({ path: apiPath, content });
       }
@@ -706,16 +813,8 @@ const server = http.createServer((req, res) => {
   if (req.url.startsWith('/admin/files') && req.method === 'GET') {
     const urlObj = new URL(req.url, 'http://localhost');
     const folder = urlObj.searchParams.get('folder');
-    if (!folder) {
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ error: '请指定文件夹' }));
-      return;
-    }
-    if (!fs.existsSync(folder)) {
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ error: '文件夹不存在: ' + folder }));
-      return;
-    }
+    if (!folder) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: '请指定文件夹' })); return; }
+    if (!fs.existsSync(folder)) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: '文件夹不存在: ' + folder })); return; }
     const files = getAllFiles(folder);
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ files }));
@@ -732,10 +831,24 @@ const server = http.createServer((req, res) => {
         fs.writeFileSync(filePath, content);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
-      } catch (e) {
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: e.message }));
-      }
+      } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  if (req.url === '/admin/file/create' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { path: apiPath, content } = JSON.parse(body);
+        const filePath = path.join(baseFolder, apiPath + '.json');
+        const dir = path.dirname(filePath);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(filePath, content);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     });
     return;
   }
@@ -753,12 +866,10 @@ const server = http.createServer((req, res) => {
       try {
         const { path: p, content } = JSON.parse(body);
         tempOverrides[p] = content;
+        saveData();
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
-      } catch (e) {
-        res.statusCode = 400;
-        res.end(JSON.stringify({ error: e.message }));
-      }
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
     });
     return;
   }
@@ -770,16 +881,89 @@ const server = http.createServer((req, res) => {
       try {
         const { path: p } = JSON.parse(body);
         delete tempOverrides[p];
+        saveData();
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
-      } catch (e) {
-        res.statusCode = 400;
-        res.end(JSON.stringify({ error: e.message }));
-      }
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
     });
     return;
   }
 
+  // Mappings CRUD
+  if (req.url === '/admin/mappings' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(urlMappings));
+    return;
+  }
+
+  if (req.url === '/admin/mappings' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { path: p, target } = JSON.parse(body);
+        urlMappings[p] = target;
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  if (req.url === '/admin/mappings' && req.method === 'DELETE') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { path: p } = JSON.parse(body);
+        delete urlMappings[p];
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  // Test mapping connectivity
+  if (req.url === '/admin/test-mapping' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { path: apiPath, target } = JSON.parse(body);
+        const targetUrl = target + apiPath;
+        const startTime = Date.now();
+        const protocol = targetUrl.startsWith('https') ? https : http;
+        
+        protocol.get(targetUrl, (proxyRes) => {
+          let data = '';
+          proxyRes.on('data', chunk => data += chunk);
+          proxyRes.on('end', () => {
+            const endTime = Date.now();
+            const headers = {};
+            Object.keys(proxyRes.headers).forEach(k => headers[k] = proxyRes.headers[k]);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({
+              status: proxyRes.statusCode,
+              url: targetUrl,
+              time: endTime - startTime,
+              size: data.length,
+              headers,
+              body: data
+            }));
+          });
+        }).on('error', (e) => {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ status: 0, url: targetUrl, time: 0, size: 0, headers: {}, body: 'Error: ' + e.message }));
+        });
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  // HAR save
   if (req.url === '/admin/har/save' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -788,18 +972,23 @@ const server = http.createServer((req, res) => {
         const files = JSON.parse(body);
         let count = 0;
         for (const [filePath, content] of Object.entries(files)) {
-          const dir = path.dirname(filePath);
+          const fullPath = path.join(__dirname, filePath);
+          const dir = path.dirname(fullPath);
           fs.mkdirSync(dir, { recursive: true });
-          fs.writeFileSync(filePath, content);
+          fs.writeFileSync(fullPath, content);
           count++;
         }
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true, count }));
-      } catch (e) {
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: e.message }));
-      }
+      } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     });
+    return;
+  }
+
+  // Folder endpoints
+  if (req.url === '/admin/folder' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ folder: baseFolder }));
     return;
   }
 
@@ -809,69 +998,113 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const { folder } = JSON.parse(body);
-        if (folder) {
-          baseFolder = folder;
+        if (!fs.existsSync(folder)) {
           res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ success: true, folder: baseFolder }));
-        } else {
-          res.statusCode = 400;
-          res.end(JSON.stringify({ error: 'folder is required' }));
+          res.end(JSON.stringify({ success: false, error: '文件夹不存在' }));
+          return;
         }
-      } catch (e) {
-        res.statusCode = 400;
-        res.end(JSON.stringify({ error: 'Invalid JSON' }));
-      }
+        baseFolder = folder;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true, folder: baseFolder }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
     });
     return;
   }
 
-  if (req.url === '/admin/folder' && req.method === 'GET') {
+  // Server info
+  if (req.url === '/admin/server-info' && req.method === 'GET') {
+    const os = require('os');
+    const interfaces = os.networkInterfaces();
+    const addresses = [];
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          addresses.push('http://' + iface.address + ':' + PORT);
+        }
+      }
+    }
+    addresses.unshift('http://localhost:' + PORT);
     res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ folder: baseFolder }));
+    res.end(JSON.stringify({ addresses }));
     return;
   }
 
-  if (req.url.startsWith('/admin')) return;
-
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  
-  if (req.method === 'OPTIONS') { res.statusCode = 200; res.end(); return; }
-
+  // Main request handler
   const urlPath = req.url.replace(/\/$/, '').split('?')[0];
-  
-  // 检查临时修改
+
+  // 1. Check temp overrides
   if (tempOverrides[urlPath]) {
     addLog(req, true);
+    res.setHeader('Content-Type', 'application/json');
     res.end(tempOverrides[urlPath]);
     return;
   }
 
-  const filePath = path.join(baseFolder, `${urlPath}.json`);
-  const notFoundPath = path.join(__dirname, '404.json');
-
-  fs.readFile(filePath, 'utf8', (err, data) => {
-    if (err) {
-      addLog(req, false);
-      fs.readFile(notFoundPath, 'utf8', (_, data404) => {
-        res.statusCode = 404;
-        res.end(data404 || '{"error": "Not Found"}');
+  // 2. Check URL mappings
+  if (urlMappings[urlPath]) {
+    const targetBase = urlMappings[urlPath];
+    const targetUrl = targetBase + urlPath;
+    const startTime = Date.now();
+    const protocol = targetUrl.startsWith('https') ? https : http;
+    
+    protocol.get(targetUrl, (proxyRes) => {
+      let data = '';
+      proxyRes.on('data', chunk => data += chunk);
+      proxyRes.on('end', () => {
+        const endTime = Date.now();
+        const headers = {};
+        Object.keys(proxyRes.headers).forEach(k => headers[k] = proxyRes.headers[k]);
+        
+        const mappingResponse = {
+          status: proxyRes.statusCode,
+          url: targetUrl,
+          time: endTime - startTime,
+          size: data.length,
+          headers,
+          body: data
+        };
+        
+        addLog(req, 'mapping', mappingResponse);
+        
+        // Forward response headers
+        Object.keys(proxyRes.headers).forEach(k => {
+          if (k !== 'transfer-encoding') res.setHeader(k, proxyRes.headers[k]);
+        });
+        res.statusCode = proxyRes.statusCode;
+        res.end(data);
       });
-    } else {
-      addLog(req, true);
-      res.end(data);
-    }
-  });
+    }).on('error', (e) => {
+      addLog(req, 'mapping', { status: 0, url: targetUrl, time: 0, size: 0, headers: {}, body: 'Error: ' + e.message });
+      res.statusCode = 502;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Mapping request failed: ' + e.message }));
+    });
+    return;
+  }
+
+  // 3. Check local file
+  const filePath = path.join(baseFolder, urlPath + '.json');
+  if (fs.existsSync(filePath)) {
+    addLog(req, true);
+    res.setHeader('Content-Type', 'application/json');
+    res.end(fs.readFileSync(filePath, 'utf8'));
+    return;
+  }
+
+  // 4. Return 404
+  addLog(req, false);
+  const notFoundPath = path.join(__dirname, '404.json');
+  res.statusCode = 404;
+  res.setHeader('Content-Type', 'application/json');
+  if (fs.existsSync(notFoundPath)) {
+    res.end(fs.readFileSync(notFoundPath, 'utf8'));
+  } else {
+    res.end(JSON.stringify({ error: 'Not Found', path: urlPath }));
+  }
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  const interfaces = require('os').networkInterfaces();
-  const ips = Object.values(interfaces).flat().filter(i => i.family === 'IPv4' && !i.internal).map(i => i.address);
-  console.log('Server running at:');
-  console.log('  Local:   http://127.0.0.1:' + PORT);
-  ips.forEach(ip => console.log('  Network: http://' + ip + ':' + PORT));
-  console.log('Admin page: http://127.0.0.1:' + PORT + '/admin');
-  console.log('Serving files from: ' + baseFolder + '/');
+  console.log('Mock server running at http://0.0.0.0:' + PORT);
+  console.log('Admin panel: http://localhost:' + PORT + '/admin');
+  console.log('Serving files from: ' + baseFolder);
 });
