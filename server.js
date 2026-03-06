@@ -239,7 +239,9 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const { path: apiPath, target } = JSON.parse(body);
-        const targetUrl = target + apiPath;
+        // 去掉目标地址末尾的斜杠，避免双斜杠
+        const targetBase = target.replace(/\/+$/, '');
+        const targetUrl = targetBase + apiPath;
         const startTime = Date.now();
         const protocol = targetUrl.startsWith('https') ? https : http;
         protocol.get(targetUrl, (proxyRes) => {
@@ -348,7 +350,9 @@ const server = http.createServer((req, res) => {
   }
   
   if (mappingTarget) {
-    const targetUrl = mappingTarget + urlPath;
+    // 去掉目标地址末尾的斜杠，避免双斜杠
+    const targetBase = mappingTarget.replace(/\/+$/, '');
+    const targetUrl = targetBase + urlPath;
     const startTime = Date.now();
     const protocol = targetUrl.startsWith('https') ? https : http;
     protocol.get(targetUrl, (proxyRes) => {
