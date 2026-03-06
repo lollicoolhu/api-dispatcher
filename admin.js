@@ -335,6 +335,59 @@ function formatSize(b) {
   return b < 1024 ? b + 'B' : b < 1048576 ? (b / 1024).toFixed(1) + 'K' : (b / 1048576).toFixed(1) + 'M';
 }
 
+// 解析 x-bbae-page header
+// 格式: Activity>Fragment#层数*可见,Fragment#层数...
+function parsePageInfo(pageHeader) {
+  if (!pageHeader) return null;
+  try {
+    const parts = pageHeader.split('>');
+    const activity = parts[0] || '';
+    const fragments = [];
+    if (parts.length > 1) {
+      const fragParts = parts.slice(1).join('>').split(',');
+      fragParts.forEach(frag => {
+        if (!frag.trim()) return;
+        const visible = frag.includes('*');
+        const cleanFrag = frag.replace('*', '');
+        const match = cleanFrag.match(/^(.+?)#(\d+)$/);
+        if (match) {
+          fragments.push({ name: match[1], depth: parseInt(match[2]), visible });
+        } else {
+          fragments.push({ name: cleanFrag, depth: 0, visible });
+        }
+      });
+    }
+    return { activity, fragments };
+  } catch (e) {
+    return null;
+  }
+}
+
+function renderPageInfo(pageHeader) {
+  const info = parsePageInfo(pageHeader);
+  if (!info) return '<em>无页面信息</em>';
+  
+  let html = '<div style="margin-bottom:15px"><strong>Activity</strong></div>';
+  html += '<div class="detail-content" style="padding:10px;margin-bottom:15px"><span style="color:#007bff;font-weight:bold">' + escapeHtml(info.activity) + '</span></div>';
+  
+  if (info.fragments.length > 0) {
+    html += '<div style="margin-bottom:10px"><strong>Fragments (' + info.fragments.length + ')</strong></div>';
+    html += '<div class="detail-content" style="padding:10px">';
+    info.fragments.forEach((f, i) => {
+      const indent = '&nbsp;'.repeat(f.depth * 4);
+      const visibleBadge = f.visible ? ' <span style="background:#28a745;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px">可见</span>' : '';
+      const depthBadge = '<span style="background:#6c757d;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:5px">#' + f.depth + '</span>';
+      html += '<div style="margin:5px 0;font-family:monospace">' + indent + (f.visible ? '▶ ' : '○ ') + '<span style="color:' + (f.visible ? '#28a745' : '#666') + '">' + escapeHtml(f.name) + '</span>' + depthBadge + visibleBadge + '</div>';
+    });
+    html += '</div>';
+  }
+  
+  html += '<div style="margin-top:15px"><strong>原始值</strong></div>';
+  html += '<div class="detail-content" style="padding:10px;font-size:11px;word-break:break-all;color:#666">' + escapeHtml(pageHeader) + '</div>';
+  
+  return html;
+}
+
 
 // ========== 访问日志 ==========
 async function refreshLogs() {
@@ -443,15 +496,18 @@ function showLogDetail(idx) {
     let body = mr.body || '';
     try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
     const mrStatusClass = mr.status >= 200 && mr.status < 300 ? 'status-2xx' : mr.status >= 400 && mr.status < 500 ? 'status-4xx' : 'status-5xx';
+    const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
+    const hasPage = !!pageHeader;
     panel.innerHTML =
       '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div></div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">请求: ' + l.path + '</div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">映射: ' + mr.url + '</div>' +
       '<div class="meta-row"><div class="meta-item">响应状态: <span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></div><div class="meta-item">耗时: ' + mr.time + 'ms</div><div class="meta-item">大小: ' + formatSize(mr.size) + '</div></div>' +
-      '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + tabBtn('headers', 'Headers') + '</div>' +
+      '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + tabBtn('headers', 'Headers') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'response' ? ' active' : '') + '"><div class="detail-content" style="max-height:250px"><pre>' + escapeHtml(body) + '</pre></div></div>' +
       '<div class="tab-content' + (logDetailTab === 'request' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>请求信息</strong></div><div class="detail-content" style="max-height:100px;margin-bottom:10px"><table><tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr><tr><td>路径</td><td>' + l.path + '</td></tr><tr><td>映射目标</td><td>' + mr.url + '</td></tr><tr><td>访问时间</td><td>' + l.time + '</td></tr><tr><td>客户端IP</td><td>' + l.ip + '</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px">' + queryTable(l.query) + '</div></div>' +
       '<div class="tab-content' + (logDetailTab === 'headers' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>请求 Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</strong></div><div class="detail-content" style="max-height:120px;margin-bottom:10px">' + headerTable(l.headers) + '</div><div style="margin-bottom:10px"><strong>响应 Headers (' + (mr.headers ? Object.keys(mr.headers).length : 0) + ')</strong></div><div class="detail-content" style="max-height:120px">' + headerTable(mr.headers) + '</div></div>' +
+      (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '') +
       '<div style="margin-top:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>';
     panel.classList.add('active');
     renderLogs();
@@ -459,6 +515,9 @@ function showLogDetail(idx) {
   }
 
   // 普通请求
+  const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
+  const hasPage = !!pageHeader;
+  
   fetch(l.path).then(r => {
     const resHeaders = {};
     r.headers.forEach((v, k) => resHeaders[k] = v);
@@ -480,10 +539,11 @@ function showLogDetail(idx) {
   panel.innerHTML =
     '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status ' + statusClass + '">' + statusText + '</span></div>' + (hasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') + (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + '</div>' +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
-    '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + '</div>' +
+    '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
     '<div class="tab-content' + (logDetailTab === 'response' ? ' active' : '') + '"><div class="detail-content" id="logResponseContent" style="max-height:200px"><em>加载中...</em></div>' + collapsible('Response Headers', '<div id="logResHeaders"><em>加载中...</em></div>', 'res') +
     '<div style="margin-top:10px">' + (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> ' : '') + '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + (hasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + '</div></div>' +
-    '<div class="tab-content' + (logDetailTab === 'request' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>基本信息</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px"><table><tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr><tr><td>路径</td><td>' + l.path + '</td></tr><tr><td>访问时间</td><td>' + l.time + '</td></tr><tr><td>客户端IP</td><td>' + l.ip + '</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px">' + queryTable(l.query) + '</div>' + collapsible('Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')', headerTable(l.headers), 'req') + '</div>';
+    '<div class="tab-content' + (logDetailTab === 'request' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>基本信息</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px"><table><tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr><tr><td>路径</td><td>' + l.path + '</td></tr><tr><td>访问时间</td><td>' + l.time + '</td></tr><tr><td>客户端IP</td><td>' + l.ip + '</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px">' + queryTable(l.query) + '</div>' + collapsible('Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')', headerTable(l.headers), 'req') + '</div>' +
+    (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '');
   panel.classList.add('active');
   renderLogs();
 }
