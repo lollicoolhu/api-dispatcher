@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>服务器管理</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <div class="container">
+    <h1>服务器管理</h1>
+    <div class="tabs">
+      <button class="tab active" onclick="showTab('settings')">设置</button>
+      <button class="tab" onclick="showTab('files')">本地文件</button>
+      <button class="tab" onclick="showTab('har')">HAR 解析</button>
+      <button class="tab" onclick="showTab('logs')">访问日志</button>
+    </div>
+
+    <div id="settings" class="panel active">
+      <div class="status">
+        <div>服务器地址: <strong id="serverAddrs"></strong></div>
+        <div style="margin-top:8px">当前服务文件夹: <strong id="current"></strong></div>
+      </div>
+      <div style="margin:15px 0">
+        <label>切换服务文件夹: <input type="text" id="folder" placeholder="文件夹名称" style="width:250px"></label>
+        <button class="btn btn-primary" onclick="changeFolder()">确认</button>
+      </div>
+      <div class="override-list">
+        <h3>临时修改列表 <span id="overrideCount">(0)</span></h3>
+        <div id="overrideList"></div>
+      </div>
+      <div class="override-list" style="margin-top:20px">
+        <h3>URL映射列表 <span id="mappingCount">(0)</span></h3>
+        <div id="mappingList"></div>
+      </div>
+    </div>
+
+    <div id="files" class="panel">
+      <div class="filters">
+        <label>解析文件夹: <input type="text" id="parseFolder" placeholder="文件夹路径" style="width:200px"></label>
+        <button class="btn btn-primary" onclick="parseLocalFolder()">解析</button>
+        <input type="text" id="fileSearch" placeholder="搜索路径..." style="width:150px" oninput="filterFiles()">
+      </div>
+      <div class="stats"><span>文件数: <strong id="fileCount">0</strong></span><span id="parseFolderInfo"></span></div>
+      <div class="main-layout">
+        <div class="list-panel"><div class="list-container" id="fileList" style="max-height:500px"></div></div>
+        <div class="detail-panel" id="fileDetailPanel"></div>
+      </div>
+    </div>
+
+    <div id="har" class="panel">
+      <div class="upload-area" id="uploadArea">
+        <p>拖拽 HAR 文件到此处，或点击选择</p>
+        <input type="file" id="fileInput" accept=".har" style="display:none">
+      </div>
+      <div id="harContent" class="hidden">
+        <div class="filters">
+          <input type="text" id="searchInput" placeholder="搜索路径..." style="width:180px">
+          <select id="methodFilter"><option value="">所有方法</option><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
+          <select id="statusFilter"><option value="">所有状态</option><option value="2xx">2xx</option><option value="4xx">4xx</option><option value="5xx">5xx</option></select>
+          <label><input type="checkbox" id="mergeData" checked> 合并相同Data</label>
+        </div>
+        <div class="stats">
+          <span>总数: <strong id="totalCount">0</strong></span>
+          <span>分组: <strong id="groupCount">0</strong></span>
+          <span>已选: <strong id="selectedCount">0</strong></span>
+        </div>
+        <div class="select-actions">
+          <button class="btn btn-sm btn-primary" onclick="selectAll()">全选</button>
+          <button class="btn btn-sm btn-secondary" onclick="selectNone()">取消</button>
+          <button class="btn btn-sm btn-secondary" onclick="expandAll()">展开</button>
+          <button class="btn btn-sm btn-secondary" onclick="collapseAll()">收起</button>
+        </div>
+        <div class="main-layout">
+          <div class="list-panel">
+            <div class="list-container" id="groupList"></div>
+            <div class="output-config">
+              <label>输出: <input type="text" id="outputFolder" value="mock" style="width:80px"></label>
+              <label><input type="checkbox" id="keepLast" checked> 保留最后</label>
+              <label><input type="checkbox" id="prettyJson" checked> 格式化</label>
+              <button class="btn btn-success" onclick="saveToServer()">保存到服务器</button>
+            </div>
+          </div>
+          <div class="detail-panel" id="detailPanel"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="logs" class="panel">
+      <div class="filters">
+        <input type="text" id="logSearch" placeholder="搜索路径..." style="width:180px" oninput="renderLogs()">
+        <select id="logStatusFilter" onchange="renderLogs()">
+          <option value="">全部</option>
+          <option value="found">本地</option>
+          <option value="mapping">映射</option>
+          <option value="missing">不存在</option>
+        </select>
+        <label><input type="checkbox" id="logGroupMissing" onchange="renderLogs()"> 不存在接口分组</label>
+        <label><input type="checkbox" id="logAutoRefresh" checked onchange="toggleAutoRefresh()"> 自动刷新</label>
+        <label>间隔: <select id="logRefreshInterval" onchange="updateRefreshInterval()">
+          <option value="500">0.5s</option>
+          <option value="1000" selected>1s</option>
+          <option value="2000">2s</option>
+          <option value="5000">5s</option>
+        </select></label>
+        <button class="btn btn-sm btn-secondary" onclick="refreshLogs()">刷新</button>
+        <button class="btn btn-sm btn-danger" onclick="clearLogs()">清空</button>
+      </div>
+      <div class="stats"><span>日志数: <strong id="logCount">0</strong></span></div>
+      <div class="main-layout">
+        <div class="list-panel"><div class="list-container" id="logList" style="max-height:500px"></div></div>
+        <div class="detail-panel" id="logDetailPanel"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- JSON Editor Modal -->
+  <div class="modal" id="jsonModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modalTitle">编辑 JSON</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:10px;font-family:monospace;font-size:12px;color:#666" id="modalPath"></div>
+        <textarea class="json-editor" id="jsonEditor"></textarea>
+        <div class="json-error" id="jsonError"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="formatJson()">格式化</button>
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" id="modalSaveBtn">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mapping Modal -->
+  <div class="modal" id="mappingModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>设置URL映射</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeMappingModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">接口路径:</label>
+          <input type="text" id="mappingPath" style="width:100%" readonly>
+        </div>
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">映射目标地址 (完整URL):</label>
+          <input type="text" id="mappingTarget" placeholder="https://api.example.com" style="width:100%">
+        </div>
+        <div style="margin-bottom:10px">
+          <button class="btn btn-info" onclick="testMapping()">测试连通</button>
+        </div>
+        <div id="mappingTestResult" class="test-result hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeMappingModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveMappingFromModal()">保存映射</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>
