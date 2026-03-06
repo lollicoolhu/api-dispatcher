@@ -325,6 +325,7 @@ const server = http.createServer((req, res) => {
 
   // ========== 主请求处理 ==========
   const urlPath = req.url.replace(/\/$/, '').split('?')[0];
+  const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
 
   // 1. 检查临时覆盖
   if (tempOverrides[urlPath]) {
@@ -352,7 +353,7 @@ const server = http.createServer((req, res) => {
   if (mappingTarget) {
     // 去掉目标地址末尾的斜杠，避免双斜杠
     const targetBase = mappingTarget.replace(/\/+$/, '');
-    const targetUrl = targetBase + urlPath;
+    const targetUrl = targetBase + urlPath + queryString; // 保留query参数
     const startTime = Date.now();
     const protocol = targetUrl.startsWith('https') ? https : http;
     protocol.get(targetUrl, (proxyRes) => {
