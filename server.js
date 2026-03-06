@@ -326,6 +326,8 @@ const server = http.createServer((req, res) => {
   // ========== 主请求处理 ==========
   const urlPath = req.url.replace(/\/$/, '').split('?')[0];
   const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
+  const filePath = path.join(baseFolder, urlPath + '.json');
+  const fileExists = fs.existsSync(filePath);
 
   // 1. 检查临时覆盖
   if (tempOverrides[urlPath]) {
@@ -335,13 +337,17 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 2. 检查URL映射 (支持精确匹配和通配符前缀匹配)
+  // 2. 检查URL映射
+  // 精确映射：优先级最高，无论本地文件是否存在
+  // 模糊映射：仅当本地文件不存在时使用
   let mappingTarget = urlMappings[urlPath]; // 精确匹配
-  if (!mappingTarget) {
-    // 通配符前缀匹配: /api/v2/* 匹配 /api/v2/xxx
+  let isExactMapping = !!mappingTarget;
+  
+  if (!mappingTarget && !fileExists) {
+    // 本地文件不存在时，才使用通配符前缀匹配
     for (const [pattern, target] of Object.entries(urlMappings)) {
       if (pattern.endsWith('*')) {
-        const prefix = pattern.slice(0, -1); // 去掉 *
+        const prefix = pattern.slice(0, -1);
         if (urlPath.startsWith(prefix)) {
           mappingTarget = target;
           break;
@@ -351,9 +357,8 @@ const server = http.createServer((req, res) => {
   }
   
   if (mappingTarget) {
-    // 去掉目标地址末尾的斜杠，避免双斜杠
     const targetBase = mappingTarget.replace(/\/+$/, '');
-    const targetUrl = targetBase + urlPath + queryString; // 保留query参数
+    const targetUrl = targetBase + urlPath + queryString;
     const startTime = Date.now();
     const protocol = targetUrl.startsWith('https') ? https : http;
     protocol.get(targetUrl, (proxyRes) => {
@@ -387,8 +392,7 @@ const server = http.createServer((req, res) => {
   }
 
   // 3. 检查本地文件
-  const filePath = path.join(baseFolder, urlPath + '.json');
-  if (fs.existsSync(filePath)) {
+  if (fileExists) {
     addLog(req, true);
     res.setHeader('Content-Type', 'application/json');
     res.end(fs.readFileSync(filePath, 'utf8'));
