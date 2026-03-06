@@ -375,15 +375,12 @@ function renderPageInfo(pageHeader) {
     html += '<div class="detail-content" style="padding:10px">';
     info.fragments.forEach((f, i) => {
       const indent = '&nbsp;'.repeat(f.depth * 4);
-      const visibleBadge = f.visible ? ' <span style="background:#28a745;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px">可见</span>' : '';
-      const depthBadge = '<span style="background:#6c757d;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;margin-left:5px">#' + f.depth + '</span>';
-      html += '<div style="margin:5px 0;font-family:monospace">' + indent + (f.visible ? '▶ ' : '○ ') + '<span style="color:' + (f.visible ? '#28a745' : '#666') + '">' + escapeHtml(f.name) + '</span>' + depthBadge + visibleBadge + '</div>';
+      const visibleStyle = f.visible ? 'color:#28a745;font-weight:bold' : 'color:#999';
+      const icon = f.visible ? '▶' : '○';
+      html += '<div style="margin:4px 0;font-family:monospace;' + visibleStyle + '">' + indent + icon + ' ' + escapeHtml(f.name) + '</div>';
     });
     html += '</div>';
   }
-  
-  html += '<div style="margin-top:15px"><strong>原始值</strong></div>';
-  html += '<div class="detail-content" style="padding:10px;font-size:11px;word-break:break-all;color:#666">' + escapeHtml(pageHeader) + '</div>';
   
   return html;
 }
@@ -459,7 +456,7 @@ function switchLogDetailTab(tab) {
   if (activeLogIdx !== null) showLogDetail(activeLogIdx);
 }
 
-let logHeadersCollapsed = { req: true, res: true };
+let logHeadersCollapsed = { req: false, res: true };
 function toggleLogHeaders(type) {
   logHeadersCollapsed[type] = !logHeadersCollapsed[type];
   if (activeLogIdx !== null) showLogDetail(activeLogIdx);
