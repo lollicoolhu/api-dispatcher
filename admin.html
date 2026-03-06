@@ -29,7 +29,7 @@
         <div id="overrideList"></div>
       </div>
       <div class="override-list" style="margin-top:20px">
-        <h3>URL映射列表 <span id="mappingCount">(0)</span></h3>
+        <h3>URL映射列表 <span id="mappingCount">(0)</span> <button class="btn btn-sm btn-success" onclick="openMappingModal('')" style="margin-left:10px">添加映射</button></h3>
         <div id="mappingList"></div>
       </div>
     </div>
@@ -142,12 +142,17 @@
       </div>
       <div class="modal-body">
         <div style="margin-bottom:15px">
-          <label style="display:block;margin-bottom:5px">接口路径:</label>
-          <input type="text" id="mappingPath" style="width:100%" readonly>
+          <label style="display:block;margin-bottom:5px">接口路径 (支持通配符 * 匹配路径前缀):</label>
+          <input type="text" id="mappingPath" style="width:100%" placeholder="/api/v2/*">
+          <div style="font-size:11px;color:#666;margin-top:3px">例: /api/v2/* 匹配所有以 /api/v2/ 开头的接口</div>
         </div>
         <div style="margin-bottom:15px">
           <label style="display:block;margin-bottom:5px">映射目标地址 (完整URL):</label>
           <input type="text" id="mappingTarget" placeholder="https://api.example.com" style="width:100%">
+        </div>
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">测试路径 (用于测试连通性):</label>
+          <input type="text" id="mappingTestPath" style="width:100%" placeholder="输入具体路径测试">
         </div>
         <div style="margin-bottom:10px">
           <button class="btn btn-info" onclick="testMapping()">测试连通</button>

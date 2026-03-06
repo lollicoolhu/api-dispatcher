@@ -68,6 +68,8 @@ function changeFolder() {
 }
 
 // ========== 映射管理 ==========
+let mappingTestData = null; // 缓存测试结果
+
 async function loadMappings() {
   const res = await fetch('/admin/mappings');
   mappings = await res.json();
@@ -79,11 +81,12 @@ function renderMappings() {
   const paths = Object.keys(mappings);
   document.getElementById('mappingCount').textContent = '(' + paths.length + ')';
   if (paths.length === 0) { list.innerHTML = '<em>无URL映射</em>'; return; }
-  list.innerHTML = paths.map(p =>
-    '<div class="mapping-item"><span class="path">' + p + '</span><span class="target">→ ' + mappings[p] + '</span>' +
+  list.innerHTML = paths.map(p => {
+    const isWildcard = p.endsWith('*');
+    return '<div class="mapping-item"><span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀匹配)</span>' : '') + '</span><span class="target">→ ' + mappings[p] + '</span>' +
     '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>'
-  ).join('');
+    '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+  }).join('');
 }
 
 async function removeMapping(apiPath) {
@@ -92,19 +95,23 @@ async function removeMapping(apiPath) {
 }
 
 function openMappingModal(apiPath) {
-  document.getElementById('mappingPath').value = apiPath;
+  document.getElementById('mappingPath').value = apiPath || '';
   document.getElementById('mappingTarget').value = mappings[apiPath] || '';
+  document.getElementById('mappingTestPath').value = apiPath && !apiPath.endsWith('*') ? apiPath : '';
   document.getElementById('mappingTestResult').classList.add('hidden');
+  mappingTestData = null;
   document.getElementById('mappingModal').classList.add('active');
 }
 
 function closeMappingModal() {
   document.getElementById('mappingModal').classList.remove('active');
+  mappingTestData = null;
 }
 
 async function saveMappingFromModal() {
-  const apiPath = document.getElementById('mappingPath').value;
+  const apiPath = document.getElementById('mappingPath').value.trim();
   const target = document.getElementById('mappingTarget').value.trim();
+  if (!apiPath) return alert('请输入接口路径');
   if (!target) return alert('请输入映射目标地址');
   await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target }) });
   loadMappings();
@@ -113,22 +120,26 @@ async function saveMappingFromModal() {
 }
 
 async function testMapping() {
-  const apiPath = document.getElementById('mappingPath').value;
+  const testPath = document.getElementById('mappingTestPath').value.trim();
   const target = document.getElementById('mappingTarget').value.trim();
   if (!target) return alert('请输入映射目标地址');
+  if (!testPath) return alert('请输入测试路径');
   const resultDiv = document.getElementById('mappingTestResult');
   resultDiv.innerHTML = '<em>测试中...</em>';
   resultDiv.classList.remove('hidden');
   try {
-    const res = await fetch('/admin/test-mapping', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target }) });
-    const data = await res.json();
-    renderMappingTestResult(data);
+    const res = await fetch('/admin/test-mapping', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: testPath, target }) });
+    mappingTestData = await res.json();
+    renderMappingTestResult();
   } catch (e) {
     resultDiv.innerHTML = '<span style="color:#dc3545">测试失败: ' + e.message + '</span>';
+    mappingTestData = null;
   }
 }
 
-function renderMappingTestResult(data) {
+function renderMappingTestResult() {
+  if (!mappingTestData) return;
+  const data = mappingTestData;
   const resultDiv = document.getElementById('mappingTestResult');
   const tabBtn = (name, label) => '<button class="detail-tab' + (mappingTestTab === name ? ' active' : '') + '" onclick="switchMappingTestTab(\'' + name + '\')">' + label + '</button>';
   const headerTable = (headers) => {
@@ -138,15 +149,35 @@ function renderMappingTestResult(data) {
   let body = data.body || '';
   try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
   const statusClass = data.status >= 200 && data.status < 300 ? 'status-2xx' : data.status >= 400 && data.status < 500 ? 'status-4xx' : 'status-5xx';
+  
+  // Request tab 内容
+  const requestContent = 
+    '<div style="margin-bottom:10px"><strong>请求信息</strong></div>' +
+    '<div class="detail-content" style="max-height:80px;margin-bottom:10px"><table>' +
+    '<tr><td>方法</td><td>GET</td></tr>' +
+    '<tr><td>目标URL</td><td>' + data.url + '</td></tr>' +
+    '</table></div>' +
+    '<div style="margin-bottom:10px"><strong>请求 Headers</strong></div>' +
+    '<div class="detail-content" style="max-height:120px">' + headerTable(data.reqHeaders || {}) + '</div>';
+  
+  // Response tab 内容
+  const responseContent = 
+    '<div class="detail-content" style="max-height:180px;margin-bottom:10px"><pre>' + escapeHtml(body) + '</pre></div>' +
+    '<div style="margin-bottom:10px"><strong>响应 Headers (' + (data.headers ? Object.keys(data.headers).length : 0) + ')</strong></div>' +
+    '<div class="detail-content" style="max-height:120px">' + headerTable(data.headers) + '</div>';
+  
   resultDiv.innerHTML =
     '<div class="meta-row"><div class="meta-item">状态: <span class="status-code ' + statusClass + '">' + data.status + '</span></div><div class="meta-item">耗时: ' + data.time + 'ms</div><div class="meta-item">大小: ' + formatSize(data.size) + '</div></div>' +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;color:#666;word-break:break-all">' + data.url + '</div>' +
-    '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('headers', 'Headers') + '</div>' +
-    '<div class="tab-content' + (mappingTestTab === 'response' ? ' active' : '') + '"><div class="detail-content" style="max-height:200px"><pre>' + escapeHtml(body) + '</pre></div></div>' +
-    '<div class="tab-content' + (mappingTestTab === 'headers' ? ' active' : '') + '"><div class="detail-content" style="max-height:200px">' + headerTable(data.headers) + '</div></div>';
+    '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + '</div>' +
+    '<div class="tab-content' + (mappingTestTab === 'response' ? ' active' : '') + '">' + responseContent + '</div>' +
+    '<div class="tab-content' + (mappingTestTab === 'request' ? ' active' : '') + '">' + requestContent + '</div>';
 }
 
-function switchMappingTestTab(tab) { mappingTestTab = tab; testMapping(); }
+function switchMappingTestTab(tab) { 
+  mappingTestTab = tab; 
+  renderMappingTestResult(); // 只重新渲染，不重新请求
+}
 
 
 // ========== Modal ==========

@@ -332,10 +332,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 2. 检查URL映射
-  if (urlMappings[urlPath]) {
-    const targetBase = urlMappings[urlPath];
-    const targetUrl = targetBase + urlPath;
+  // 2. 检查URL映射 (支持精确匹配和通配符前缀匹配)
+  let mappingTarget = urlMappings[urlPath]; // 精确匹配
+  if (!mappingTarget) {
+    // 通配符前缀匹配: /api/v2/* 匹配 /api/v2/xxx
+    for (const [pattern, target] of Object.entries(urlMappings)) {
+      if (pattern.endsWith('*')) {
+        const prefix = pattern.slice(0, -1); // 去掉 *
+        if (urlPath.startsWith(prefix)) {
+          mappingTarget = target;
+          break;
+        }
+      }
+    }
+  }
+  
+  if (mappingTarget) {
+    const targetUrl = mappingTarget + urlPath;
     const startTime = Date.now();
     const protocol = targetUrl.startsWith('https') ? https : http;
     protocol.get(targetUrl, (proxyRes) => {
