@@ -180,19 +180,51 @@ function switchMappingTestTab(tab) {
 }
 
 
-// ========== Modal ==========
-function openModal(title, path, content, onSave) {
+// ========== Confirm Modal ==========
+let confirmResolveCallback = null;
+
+function showConfirm(message, title = '确认', okText = '确定', isDanger = true) {
+  return new Promise(resolve => {
+    confirmResolveCallback = resolve;
+    document.getElementById('confirmTitle').textContent = title;
+    document.getElementById('confirmMessage').innerHTML = message;
+    const okBtn = document.getElementById('confirmOkBtn');
+    okBtn.textContent = okText;
+    okBtn.className = 'btn ' + (isDanger ? 'btn-danger' : 'btn-primary');
+    document.getElementById('confirmModal').classList.add('active');
+  });
+}
+
+function confirmResolve(result) {
+  document.getElementById('confirmModal').classList.remove('active');
+  if (confirmResolveCallback) {
+    confirmResolveCallback(result);
+    confirmResolveCallback = null;
+  }
+}
+
+// ========== JSON Editor Modal ==========
+let currentModalPath = '';
+
+function openModal(title, path, content, onSave, showFileActions = false) {
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalPath').textContent = path;
   document.getElementById('jsonEditor').value = content;
   document.getElementById('jsonError').textContent = '';
+  currentModalPath = path;
   modalCallback = onSave;
+  
+  // 显示/隐藏永久保存和删除按钮
+  document.getElementById('modalPermanentBtn').style.display = showFileActions ? 'inline-block' : 'none';
+  document.getElementById('modalDeleteBtn').style.display = showFileActions ? 'inline-block' : 'none';
+  
   document.getElementById('jsonModal').classList.add('active');
 }
 
 function closeModal() {
   document.getElementById('jsonModal').classList.remove('active');
   modalCallback = null;
+  currentModalPath = '';
 }
 
 function formatJson() {
@@ -215,6 +247,43 @@ document.getElementById('modalSaveBtn').onclick = function() {
     document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
   }
 };
+
+async function savePermanentFromModal() {
+  const content = document.getElementById('jsonEditor').value;
+  try {
+    JSON.parse(content);
+  } catch (e) {
+    document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
+    return;
+  }
+  const confirmed = await showConfirm('确定永久保存到本地文件？<br><br><span style="color:#666;font-size:12px">' + currentModalPath + '</span>', '永久保存', '保存', false);
+  if (!confirmed) return;
+  const res = await fetch('/admin/file/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: currentModalPath, content }) });
+  const result = await res.json();
+  if (result.success) {
+    alert('永久保存成功');
+    closeModal();
+    if (activeLogIdx !== null) refreshLogs();
+  } else {
+    alert('保存失败: ' + result.error);
+  }
+}
+
+async function deleteFileFromModal() {
+  const confirmed1 = await showConfirm('确定删除本地文件？<br><br><span style="color:#666;font-size:12px">' + currentModalPath + '</span>', '删除文件', '删除');
+  if (!confirmed1) return;
+  const confirmed2 = await showConfirm('<strong style="color:#dc3545">删除后无法恢复！</strong><br><br>再次确认删除？', '二次确认', '确认删除');
+  if (!confirmed2) return;
+  const res = await fetch('/admin/file/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: currentModalPath }) });
+  const result = await res.json();
+  if (result.success) {
+    alert('删除成功');
+    closeModal();
+    if (activeLogIdx !== null) refreshLogs();
+  } else {
+    alert('删除失败: ' + result.error);
+  }
+}
 
 // ========== 临时覆盖管理 ==========
 async function loadOverrides() {
@@ -247,14 +316,14 @@ async function editOverride(path) {
   });
 }
 
-async function setTempOverride(path, originalContent) {
+async function setTempOverride(path, originalContent, showFileActions = false) {
   let content = overrides[path] || originalContent;
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
-  openModal('临时修改返回值', path, content, async (newContent) => {
+  openModal('修改返回值', path, content, async (newContent) => {
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent }) });
     loadOverrides();
     if (activeLogIdx !== null) showLogDetail(activeLogIdx);
-  });
+  }, showFileActions);
 }
 
 // ========== 本地文件管理 ==========
@@ -367,20 +436,23 @@ function renderPageInfo(pageHeader) {
   const info = parsePageInfo(pageHeader);
   if (!info) return '<em>无页面信息</em>';
   
-  let html = '<div style="margin-bottom:15px"><strong>Activity</strong></div>';
+  let html = '<div style="margin-bottom:12px"><strong>Activity</strong></div>';
   html += '<div class="detail-content" style="padding:10px;margin-bottom:15px"><span style="color:#007bff;font-weight:bold">' + escapeHtml(info.activity) + '</span></div>';
   
   if (info.fragments.length > 0) {
-    html += '<div style="margin-bottom:10px"><strong>Fragments (' + info.fragments.length + ')</strong></div>';
-    html += '<div class="detail-content" style="padding:10px">';
-    info.fragments.forEach((f, i) => {
-      const indent = '&nbsp;'.repeat(f.depth * 4);
-      const visibleStyle = f.visible ? 'color:#28a745;font-weight:bold' : 'color:#999';
-      const icon = f.visible ? '▶' : '○';
-      html += '<div style="margin:4px 0;font-family:monospace;' + visibleStyle + '">' + indent + icon + ' ' + escapeHtml(f.name) + '</div>';
+    html += '<div style="margin-bottom:10px"><strong>Fragments</strong></div>';
+    html += '<div class="detail-content" style="padding:10px;font-family:monospace;font-size:12px">';
+    info.fragments.forEach((f) => {
+      const tabs = '\t'.repeat(f.depth);
+      const color = f.visible ? '#28a745' : '#666';
+      const weight = f.visible ? 'bold' : 'normal';
+      html += '<pre style="margin:0;color:' + color + ';font-weight:' + weight + '">' + tabs + escapeHtml(f.name) + '</pre>';
     });
     html += '</div>';
   }
+  
+  html += '<div style="margin-top:15px;margin-bottom:10px"><strong>原始数据</strong></div>';
+  html += '<div class="detail-content" style="padding:10px;font-size:11px;word-break:break-all;color:#666">' + escapeHtml(pageHeader) + '</div>';
   
   return html;
 }
@@ -395,7 +467,8 @@ async function refreshLogs() {
 }
 
 async function clearLogs() {
-  if (!confirm('确定清空所有日志?')) return;
+  const confirmed = await showConfirm('确定清空所有日志?', '清空日志', '清空');
+  if (!confirmed) return;
   await fetch('/admin/logs', { method: 'DELETE' });
   activeLogIdx = null;
   document.getElementById('logDetailPanel').classList.remove('active');
@@ -538,7 +611,13 @@ function showLogDetail(idx) {
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
     '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
     '<div class="tab-content' + (logDetailTab === 'response' ? ' active' : '') + '"><div class="detail-content" id="logResponseContent" style="max-height:200px"><em>加载中...</em></div>' + collapsible('Response Headers', '<div id="logResHeaders"><em>加载中...</em></div>', 'res') +
-    '<div style="margin-top:10px">' + (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> ' : '') + '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + (hasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + '</div></div>' +
+    '<div style="margin-top:10px">' + 
+    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">创建文件</button> ' : '') + 
+    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ')">修改返回</button> ' +
+    '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
+    (hasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
+    (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + 
+    '</div></div>' +
     '<div class="tab-content' + (logDetailTab === 'request' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>基本信息</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px"><table><tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr><tr><td>路径</td><td>' + l.path + '</td></tr><tr><td>访问时间</td><td>' + l.time + '</td></tr><tr><td>客户端IP</td><td>' + l.ip + '</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px">' + queryTable(l.query) + '</div>' + collapsible('Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')', headerTable(l.headers), 'req') + '</div>' +
     (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '');
   panel.classList.add('active');
@@ -560,8 +639,28 @@ function createMissingFile(apiPath) {
   });
 }
 
-function editLogOverride(path) {
-  setTimeout(() => { setTempOverride(path, window.currentLogResponse || '{}'); }, 100);
+function editLocalFileFromLog(apiPath) {
+  const content = window.currentLogResponse || '{}';
+  let formatted = content;
+  try { formatted = JSON.stringify(JSON.parse(content), null, 2); } catch {}
+  openModal('永久修改文件', apiPath, formatted, async (newContent) => {
+    const res = await fetch('/admin/file/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, content: newContent }) });
+    const result = await res.json();
+    if (result.success) { alert('保存成功'); refreshLogs(); }
+    else alert('保存失败: ' + result.error);
+  });
+}
+
+async function deleteLocalFileFromLog(apiPath) {
+  if (!confirm('确定删除本地文件 ' + apiPath + ' ?')) return;
+  const res = await fetch('/admin/file/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath }) });
+  const result = await res.json();
+  if (result.success) { alert('删除成功'); refreshLogs(); }
+  else alert('删除失败: ' + result.error);
+}
+
+function editLogOverride(path, isLocalFile = false) {
+  setTimeout(() => { setTempOverride(path, window.currentLogResponse || '{}', isLocalFile); }, 100);
 }
 
 async function removeOverrideAndRefreshLog(path) {

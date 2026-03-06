@@ -36,6 +36,10 @@ loadData();
 
 // 添加访问日志
 function addLog(req, found, mappingResponse = null) {
+  // 跳过来自管理页面的内部请求（通过referer判断）
+  const referer = req.headers['referer'] || '';
+  if (referer.includes('/admin')) return;
+  
   const now = new Date();
   const time = now.toLocaleString('zh-CN', { hour12: false });
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
@@ -156,6 +160,27 @@ const server = http.createServer((req, res) => {
         fs.writeFileSync(filePath, content);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  // API: 删除文件
+  if (req.url === '/admin/file/delete' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { path: apiPath } = JSON.parse(body);
+        const filePath = path.join(baseFolder, apiPath + '.json');
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: true }));
+        } else {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: '文件不存在' }));
+        }
       } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
     });
     return;
