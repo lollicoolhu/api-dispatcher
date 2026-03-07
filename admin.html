@@ -21,8 +21,19 @@
         <div style="margin-top:8px">当前服务文件夹: <strong id="current"></strong></div>
       </div>
       <div style="margin:15px 0">
-        <label>切换服务文件夹: <input type="text" id="folder" placeholder="文件夹名称" style="width:250px"></label>
-        <button class="btn btn-primary" onclick="changeFolder()">确认</button>
+        <label>切换服务文件夹: </label>
+        <input type="file" id="folderPicker" webkitdirectory style="display:none">
+        <button class="btn btn-primary" onclick="document.getElementById('folderPicker').click()">选择文件夹</button>
+        <span id="selectedFolder" style="margin-left:10px;color:#666"></span>
+      </div>
+      <div class="override-list">
+        <h3>全局映射服务器</h3>
+        <div style="display:flex;gap:10px;align-items:center;padding:10px;background:#f8f9fa;border-radius:4px">
+          <label><input type="checkbox" id="globalServerEnabled" onchange="updateGlobalServer()"> 启用</label>
+          <input type="text" id="globalServerUrl" placeholder="https://api.example.com" style="flex:1" onchange="updateGlobalServer()">
+          <label>优先级: <input type="number" id="globalServerPriority" value="100" style="width:60px" onchange="updateGlobalServer()"></label>
+          <span style="color:#666;font-size:11px">(数字越大优先级越高，本地文件=0)</span>
+        </div>
       </div>
       <div class="override-list">
         <h3>临时修改列表 <span id="overrideCount">(0)</span></h3>
@@ -94,7 +105,7 @@
           <option value="mapping">映射</option>
           <option value="missing">不存在</option>
         </select>
-        <label><input type="checkbox" id="logGroupMissing" onchange="renderLogs()"> 不存在接口分组</label>
+        <label><input type="checkbox" id="logGroupSame" onchange="renderLogs()"> 折叠相同接口</label>
         <label><input type="checkbox" id="logAutoRefresh" checked onchange="toggleAutoRefresh()"> 自动刷新</label>
         <label>间隔: <select id="logRefreshInterval" onchange="updateRefreshInterval()">
           <option value="500">0.5s</option>
@@ -167,6 +178,10 @@
         <div style="margin-bottom:15px">
           <label style="display:block;margin-bottom:5px">映射目标地址 (完整URL):</label>
           <input type="text" id="mappingTarget" placeholder="https://api.example.com" style="width:100%">
+        </div>
+        <div style="margin-bottom:15px;display:flex;gap:20px;align-items:center">
+          <label>优先级: <input type="number" id="mappingPriority" value="1" style="width:60px"></label>
+          <span style="color:#666;font-size:11px">(数字越大优先级越高，本地文件=0，全局服务器默认=100)</span>
         </div>
         <div style="margin-bottom:15px">
           <label style="display:block;margin-bottom:5px">测试路径 (用于测试连通性):</label>

@@ -97,3 +97,11 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 .json-error { color: #dc3545; font-size: 12px; margin-top: 5px; }
 .test-result { margin-top: 15px; padding: 12px; background: #f8f9fa; border-radius: 4px; }
 .test-result .detail-tabs { margin-top: 10px; }
+
+.override-item.disabled, .mapping-item.disabled { opacity: 0.5; }
+.override-item .priority, .mapping-item .priority { background: #6c757d; color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 10px; }
+
+.section-title { font-weight: bold; margin: 15px 0 8px 0; padding: 6px 10px; background: #e9ecef; border-radius: 4px; color: #495057; font-size: 12px; }
+.section-title:first-child { margin-top: 0; }
+.section-tag { font-weight: normal; font-size: 11px; color: #17a2b8; margin-left: 8px; }
+.tab-content .detail-content { max-height: none; }

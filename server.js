@@ -10,16 +10,36 @@ let accessLogs = [];
 const MAX_LOGS = 1000;
 
 const DATA_FILE = path.join(__dirname, '.mock-server-data.json');
-let tempOverrides = {};
-let urlMappings = {};
+let tempOverrides = {};  // { path: { content, enabled, priority } }
+let urlMappings = {};    // { path: { target, enabled, priority } }
+let globalServer = { url: '', enabled: false, priority: 100 };
 
 // 加载持久化数据
 function loadData() {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-      tempOverrides = data.tempOverrides || {};
-      urlMappings = data.urlMappings || data.proxyMappings || {};
+      // 兼容旧格式
+      const oldOverrides = data.tempOverrides || {};
+      const oldMappings = data.urlMappings || data.proxyMappings || {};
+      // 转换旧格式到新格式
+      tempOverrides = {};
+      for (const [k, v] of Object.entries(oldOverrides)) {
+        if (typeof v === 'string') {
+          tempOverrides[k] = { content: v, enabled: true, priority: 1 };
+        } else {
+          tempOverrides[k] = v;
+        }
+      }
+      urlMappings = {};
+      for (const [k, v] of Object.entries(oldMappings)) {
+        if (typeof v === 'string') {
+          urlMappings[k] = { target: v, enabled: true, priority: 1 };
+        } else {
+          urlMappings[k] = v;
+        }
+      }
+      globalServer = data.globalServer || { url: '', enabled: false, priority: 100 };
       console.log('Loaded ' + Object.keys(tempOverrides).length + ' overrides, ' + Object.keys(urlMappings).length + ' mappings');
     }
   } catch (e) { console.error('Failed to load data:', e.message); }
@@ -28,14 +48,14 @@ function loadData() {
 // 保存持久化数据
 function saveData() {
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ tempOverrides, urlMappings }, null, 2));
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ tempOverrides, urlMappings, globalServer }, null, 2));
   } catch (e) { console.error('Failed to save data:', e.message); }
 }
 
 loadData();
 
 // 添加访问日志
-function addLog(req, found, mappingResponse = null) {
+function addLog(req, found, mappingResponse = null, reqBody = null) {
   // 跳过来自管理页面的内部请求（通过referer判断）
   const referer = req.headers['referer'] || '';
   if (referer.includes('/admin')) return;
@@ -47,7 +67,7 @@ function addLog(req, found, mappingResponse = null) {
   const urlObj = new URL(req.url, 'http://localhost');
   const query = {};
   urlObj.searchParams.forEach((v, k) => query[k] = v);
-  accessLogs.unshift({ time, path: urlPath, ip, found, method: req.method, fullUrl: req.url, query, headers: req.headers, mappingResponse });
+  accessLogs.unshift({ time, path: urlPath, ip, found, method: req.method, fullUrl: req.url, query, headers: req.headers, mappingResponse, body: reqBody });
   if (accessLogs.length > MAX_LOGS) accessLogs.pop();
 }
 
@@ -197,8 +217,16 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const { path: p, content } = JSON.parse(body);
-        tempOverrides[p] = content;
+        const { path: p, content, enabled, priority } = JSON.parse(body);
+        if (tempOverrides[p]) {
+          // 更新现有
+          if (content !== undefined) tempOverrides[p].content = content;
+          if (enabled !== undefined) tempOverrides[p].enabled = enabled;
+          if (priority !== undefined) tempOverrides[p].priority = priority;
+        } else {
+          // 新建
+          tempOverrides[p] = { content: content || '{}', enabled: enabled !== false, priority: priority ?? 1 };
+        }
         saveData();
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
@@ -232,8 +260,14 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const { path: p, target } = JSON.parse(body);
-        urlMappings[p] = target;
+        const { path: p, target, enabled, priority } = JSON.parse(body);
+        if (urlMappings[p]) {
+          if (target !== undefined) urlMappings[p].target = target;
+          if (enabled !== undefined) urlMappings[p].enabled = enabled;
+          if (priority !== undefined) urlMappings[p].priority = priority;
+        } else {
+          urlMappings[p] = { target: target || '', enabled: enabled !== false, priority: priority ?? 1 };
+        }
         saveData();
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
@@ -248,6 +282,29 @@ const server = http.createServer((req, res) => {
       try {
         const { path: p } = JSON.parse(body);
         delete urlMappings[p];
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  // API: 全局服务器
+  if (req.url === '/admin/global-server' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(globalServer));
+    return;
+  }
+  if (req.url === '/admin/global-server' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        if (data.url !== undefined) globalServer.url = data.url;
+        if (data.enabled !== undefined) globalServer.enabled = data.enabled;
+        if (data.priority !== undefined) globalServer.priority = data.priority;
         saveData();
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
@@ -354,35 +411,88 @@ const server = http.createServer((req, res) => {
   const filePath = path.join(baseFolder, urlPath + '.json');
   const fileExists = fs.existsSync(filePath);
 
-  // 1. 检查临时覆盖
-  if (tempOverrides[urlPath]) {
-    addLog(req, true);
-    res.setHeader('Content-Type', 'application/json');
-    res.end(tempOverrides[urlPath]);
-    return;
-  }
+  // 解析请求体
+  let reqBody = '';
+  req.on('data', chunk => reqBody += chunk);
+  req.on('end', () => {
+    handleRequest(req, res, urlPath, queryString, filePath, fileExists, reqBody);
+  });
+});
 
-  // 2. 检查URL映射
-  // 精确映射：优先级最高，无论本地文件是否存在
-  // 模糊映射：仅当本地文件不存在时使用
-  let mappingTarget = urlMappings[urlPath]; // 精确匹配
-  let isExactMapping = !!mappingTarget;
+function handleRequest(req, res, urlPath, queryString, filePath, fileExists, reqBody) {
+  // 收集所有可用的响应源及其优先级
+  const sources = [];
   
-  if (!mappingTarget && !fileExists) {
-    // 本地文件不存在时，才使用通配符前缀匹配
-    for (const [pattern, target] of Object.entries(urlMappings)) {
-      if (pattern.endsWith('*')) {
-        const prefix = pattern.slice(0, -1);
-        if (urlPath.startsWith(prefix)) {
-          mappingTarget = target;
-          break;
-        }
+  // 1. 临时覆盖 (优先级由用户设置，默认1)
+  const override = tempOverrides[urlPath];
+  if (override && override.enabled) {
+    sources.push({ type: 'override', priority: override.priority ?? 1, data: override });
+  }
+  
+  // 2. 精确URL映射 (优先级由用户设置，默认1)
+  const exactMapping = urlMappings[urlPath];
+  if (exactMapping && exactMapping.enabled) {
+    sources.push({ type: 'exactMapping', priority: exactMapping.priority ?? 1, data: exactMapping });
+  }
+  
+  // 3. 本地文件 (优先级0)
+  if (fileExists) {
+    sources.push({ type: 'localFile', priority: 0, data: filePath });
+  }
+  
+  // 4. 通配符URL映射 (优先级由用户设置，默认1)
+  for (const [pattern, mapping] of Object.entries(urlMappings)) {
+    if (pattern.endsWith('*') && mapping.enabled) {
+      const prefix = pattern.slice(0, -1);
+      if (urlPath.startsWith(prefix)) {
+        sources.push({ type: 'wildcardMapping', priority: mapping.priority ?? 1, data: mapping, pattern });
+        break;
       }
     }
   }
   
-  if (mappingTarget) {
-    const targetBase = mappingTarget.replace(/\/+$/, '');
+  // 5. 全局服务器 (优先级由用户设置，默认100)
+  if (globalServer.enabled && globalServer.url) {
+    sources.push({ type: 'globalServer', priority: globalServer.priority ?? 100, data: globalServer });
+  }
+  
+  // 按优先级排序（数字越大优先级越高）
+  sources.sort((a, b) => b.priority - a.priority);
+  
+  // 选择优先级最高的源
+  const selected = sources[0];
+  
+  if (!selected) {
+    // 无可用源，返回404
+    addLog(req, false, null, reqBody);
+    const notFoundPath = path.join(__dirname, '404.json');
+    res.statusCode = 404;
+    res.setHeader('Content-Type', 'application/json');
+    if (fs.existsSync(notFoundPath)) {
+      res.end(fs.readFileSync(notFoundPath, 'utf8'));
+    } else {
+      res.end(JSON.stringify({ error: 'Not Found', path: urlPath }));
+    }
+    return;
+  }
+  
+  // 根据选中的源返回响应
+  if (selected.type === 'override') {
+    addLog(req, true, null, reqBody);
+    res.setHeader('Content-Type', 'application/json');
+    res.end(selected.data.content);
+    return;
+  }
+  
+  if (selected.type === 'localFile') {
+    addLog(req, true, null, reqBody);
+    res.setHeader('Content-Type', 'application/json');
+    res.end(fs.readFileSync(selected.data, 'utf8'));
+    return;
+  }
+  
+  if (selected.type === 'exactMapping' || selected.type === 'wildcardMapping' || selected.type === 'globalServer') {
+    const targetBase = (selected.data.target || selected.data.url).replace(/\/+$/, '');
     const targetUrl = targetBase + urlPath + queryString;
     const startTime = Date.now();
     const protocol = targetUrl.startsWith('https') ? https : http;
@@ -398,9 +508,10 @@ const server = http.createServer((req, res) => {
           time: Date.now() - startTime,
           size: data.length,
           headers,
-          body: data
+          body: data,
+          sourceType: selected.type
         };
-        addLog(req, 'mapping', mappingResponse);
+        addLog(req, 'mapping', mappingResponse, reqBody);
         Object.keys(proxyRes.headers).forEach(k => {
           if (k !== 'transfer-encoding') res.setHeader(k, proxyRes.headers[k]);
         });
@@ -408,33 +519,14 @@ const server = http.createServer((req, res) => {
         res.end(data);
       });
     }).on('error', (e) => {
-      addLog(req, 'mapping', { status: 0, url: targetUrl, time: 0, size: 0, headers: {}, body: 'Error: ' + e.message });
+      addLog(req, 'mapping', { status: 0, url: targetUrl, time: 0, size: 0, headers: {}, body: 'Error: ' + e.message, sourceType: selected.type }, reqBody);
       res.statusCode = 502;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Mapping request failed: ' + e.message }));
     });
     return;
   }
-
-  // 3. 检查本地文件
-  if (fileExists) {
-    addLog(req, true);
-    res.setHeader('Content-Type', 'application/json');
-    res.end(fs.readFileSync(filePath, 'utf8'));
-    return;
-  }
-
-  // 4. 返回404
-  addLog(req, false);
-  const notFoundPath = path.join(__dirname, '404.json');
-  res.statusCode = 404;
-  res.setHeader('Content-Type', 'application/json');
-  if (fs.existsSync(notFoundPath)) {
-    res.end(fs.readFileSync(notFoundPath, 'utf8'));
-  } else {
-    res.end(JSON.stringify({ error: 'Not Found', path: urlPath }));
-  }
-});
+}
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('Mock server running at http://0.0.0.0:' + PORT);

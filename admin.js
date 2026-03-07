@@ -1,13 +1,12 @@
 // 状态变量
 let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
-let logs = [], expandedMissingGroups = new Set(), activeLogIdx = null, logDetailTab = 'response', logRefreshTimer = null;
-let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, currentParseFolder = '';
+let logs = [], expandedLogGroups = new Set(), activeLogIdx = null, logDetailTab = 'response', logRefreshTimer = null;
+let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, globalServer = {}, currentParseFolder = '';
 let modalCallback = null, mappingTestTab = 'response';
 
 // 初始化
 fetch('/admin/folder').then(r => r.json()).then(d => {
   document.getElementById('current').textContent = d.folder;
-  document.getElementById('folder').value = localStorage.getItem('lastFolder') || '';
   document.getElementById('parseFolder').value = localStorage.getItem('lastParseFolder') || d.folder;
 });
 fetch('/admin/server-info').then(r => r.json()).then(d => {
@@ -17,6 +16,22 @@ fetch('/admin/server-info').then(r => r.json()).then(d => {
 });
 loadOverrides();
 loadMappings();
+loadGlobalServer();
+
+// 文件夹选择
+document.getElementById('folderPicker').addEventListener('change', function(e) {
+  if (e.target.files.length > 0) {
+    const path = e.target.files[0].webkitRelativePath.split('/')[0];
+    document.getElementById('selectedFolder').textContent = path;
+    fetch('/admin/folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: path }) })
+      .then(r => r.json()).then(d => {
+        if (d.success) {
+          document.getElementById('current').textContent = d.folder;
+          alert('切换成功');
+        } else alert(d.error);
+      });
+  }
+});
 
 // Tab切换
 function showTab(name) {
@@ -53,18 +68,21 @@ document.getElementById('logList').addEventListener('scroll', function() {
   if (this.scrollTop > 50) stopAutoRefresh();
 });
 
-// 文件夹切换
-function changeFolder() {
-  const folder = document.getElementById('folder').value;
-  if (!folder) return alert('请输入文件夹名称');
-  fetch('/admin/folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder }) })
-    .then(r => r.json()).then(d => {
-      if (d.success) {
-        document.getElementById('current').textContent = d.folder;
-        localStorage.setItem('lastFolder', folder);
-        alert('切换成功');
-      } else alert(d.error);
-    });
+// ========== 全局服务器 ==========
+async function loadGlobalServer() {
+  const res = await fetch('/admin/global-server');
+  globalServer = await res.json();
+  document.getElementById('globalServerEnabled').checked = globalServer.enabled || false;
+  document.getElementById('globalServerUrl').value = globalServer.url || '';
+  document.getElementById('globalServerPriority').value = globalServer.priority ?? 100;
+}
+
+async function updateGlobalServer() {
+  const enabled = document.getElementById('globalServerEnabled').checked;
+  const url = document.getElementById('globalServerUrl').value.trim();
+  const priority = parseInt(document.getElementById('globalServerPriority').value) || 100;
+  await fetch('/admin/global-server', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled, url, priority }) });
+  globalServer = { enabled, url, priority };
 }
 
 // ========== 映射管理 ==========
@@ -82,11 +100,23 @@ function renderMappings() {
   document.getElementById('mappingCount').textContent = '(' + paths.length + ')';
   if (paths.length === 0) { list.innerHTML = '<em>无URL映射</em>'; return; }
   list.innerHTML = paths.map(p => {
+    const m = mappings[p];
     const isWildcard = p.endsWith('*');
-    return '<div class="mapping-item"><span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀匹配)</span>' : '') + '</span><span class="target">→ ' + mappings[p] + '</span>' +
+    const disabled = !m.enabled;
+    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + '">' +
+    '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+    '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
+    '<span class="target">→ ' + m.target + '</span>' +
+    '<span class="priority" title="优先级">P' + (m.priority ?? 1) + '</span>' +
     '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
     '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
+}
+
+async function toggleMappingEnabled(apiPath, enabled) {
+  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, enabled }) });
+  mappings[apiPath].enabled = enabled;
+  renderMappings();
 }
 
 async function removeMapping(apiPath) {
@@ -96,7 +126,9 @@ async function removeMapping(apiPath) {
 
 function openMappingModal(apiPath) {
   document.getElementById('mappingPath').value = apiPath || '';
-  document.getElementById('mappingTarget').value = mappings[apiPath] || '';
+  const m = mappings[apiPath] || {};
+  document.getElementById('mappingTarget').value = m.target || '';
+  document.getElementById('mappingPriority').value = m.priority ?? 1;
   document.getElementById('mappingTestPath').value = apiPath && !apiPath.endsWith('*') ? apiPath : '';
   document.getElementById('mappingTestResult').classList.add('hidden');
   mappingTestData = null;
@@ -111,9 +143,10 @@ function closeMappingModal() {
 async function saveMappingFromModal() {
   const apiPath = document.getElementById('mappingPath').value.trim();
   const target = document.getElementById('mappingTarget').value.trim();
+  const priority = parseInt(document.getElementById('mappingPriority').value) || 1;
   if (!apiPath) return alert('请输入接口路径');
   if (!target) return alert('请输入映射目标地址');
-  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target }) });
+  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target, enabled: true, priority }) });
   loadMappings();
   closeMappingModal();
   if (activeLogIdx !== null) showLogDetail(activeLogIdx);
@@ -297,11 +330,22 @@ function renderOverrides() {
   const paths = Object.keys(overrides);
   document.getElementById('overrideCount').textContent = '(' + paths.length + ')';
   if (paths.length === 0) { list.innerHTML = '<em>无临时修改</em>'; return; }
-  list.innerHTML = paths.map(p =>
-    '<div class="override-item"><span class="path">' + p + '</span>' +
+  list.innerHTML = paths.map(p => {
+    const o = overrides[p];
+    const disabled = !o.enabled;
+    return '<div class="override-item' + (disabled ? ' disabled' : '') + '">' +
+    '<input type="checkbox" ' + (o.enabled ? 'checked' : '') + ' onchange="toggleOverrideEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+    '<span class="path">' + p + '</span>' +
+    '<span class="priority" title="优先级">P' + (o.priority ?? 1) + '</span>' +
     '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>'
-  ).join('');
+    '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+  }).join('');
+}
+
+async function toggleOverrideEnabled(path, enabled) {
+  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, enabled }) });
+  overrides[path].enabled = enabled;
+  renderOverrides();
 }
 
 async function removeOverride(path) {
@@ -310,17 +354,19 @@ async function removeOverride(path) {
 }
 
 async function editOverride(path) {
-  openModal('编辑临时返回值', path, overrides[path] || '', async (content) => {
+  const o = overrides[path] || {};
+  openModal('编辑临时返回值', path, o.content || '', async (content) => {
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content }) });
     loadOverrides();
   });
 }
 
 async function setTempOverride(path, originalContent, showFileActions = false) {
-  let content = overrides[path] || originalContent;
+  const o = overrides[path] || {};
+  let content = o.content || originalContent;
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
   openModal('修改返回值', path, content, async (newContent) => {
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent }) });
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority: 1 }) });
     loadOverrides();
     if (activeLogIdx !== null) showLogDetail(activeLogIdx);
   }, showFileActions);
@@ -478,7 +524,7 @@ async function clearLogs() {
 function renderLogs() {
   const search = document.getElementById('logSearch').value.toLowerCase();
   const statusFilter = document.getElementById('logStatusFilter').value;
-  const groupMissing = document.getElementById('logGroupMissing').checked;
+  const groupSame = document.getElementById('logGroupSame').checked;
   let filtered = logs.map((l, i) => ({ ...l, idx: i })).filter(l => {
     if (search && !l.path.toLowerCase().includes(search)) return false;
     if (statusFilter === 'found' && l.found !== true) return false;
@@ -489,28 +535,42 @@ function renderLogs() {
   const container = document.getElementById('logList');
   const getStatusClass = (found) => found === true ? 'found' : found === 'mapping' ? 'mapping' : 'missing';
   const getStatusText = (found) => found === true ? '✓' : found === 'mapping' ? '⇄' : '404';
+  
+  // 计算时间差
+  const formatTimeAgo = (timeStr) => {
+    const now = new Date();
+    const time = new Date(timeStr.replace(/\//g, '-'));
+    const diff = Math.floor((now - time) / 1000);
+    if (diff < 60) return diff + '秒前';
+    if (diff < 3600) return Math.floor(diff / 60) + '分钟前';
+    if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
+    return Math.floor(diff / 86400) + '天前';
+  };
 
-  if (groupMissing && statusFilter !== 'found' && statusFilter !== 'mapping') {
-    const missingGroups = {};
+  if (groupSame) {
+    // 按路径分组
+    const pathGroups = {};
     filtered.forEach(l => {
-      if (l.found !== true && l.found !== 'mapping') {
-        if (!missingGroups[l.path]) missingGroups[l.path] = [];
-        missingGroups[l.path].push(l);
-      }
+      if (!pathGroups[l.path]) pathGroups[l.path] = [];
+      pathGroups[l.path].push(l);
     });
     let html = '';
-    for (const [path, items] of Object.entries(missingGroups)) {
-      const expanded = expandedMissingGroups.has(path);
-      html += '<div class="group-header" onclick="toggleMissingGroup(\'' + path.replace(/'/g, "\\'") + '\')"><span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span><span class="badge badge-missing">404</span><span class="path">' + path + '</span><span class="badge badge-count">' + items.length + '</span></div>';
+    for (const [path, items] of Object.entries(pathGroups)) {
+      const expanded = expandedLogGroups.has(path);
+      const latest = items[0];
+      const timeAgo = formatTimeAgo(latest.time);
+      html += '<div class="group-header" onclick="toggleLogGroup(\'' + path.replace(/'/g, "\\'") + '\')">' +
+        '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
+        '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
+        '<span class="path">' + path + '</span>' +
+        '<span class="badge badge-count">' + items.length + '次</span>' +
+        '<span style="color:#666;font-size:11px">' + timeAgo + '</span></div>';
       html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
       items.forEach(l => {
-        html += '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span></div>';
+        html += '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
       });
       html += '</div>';
     }
-    filtered.filter(l => l.found === true || l.found === 'mapping').forEach(l => {
-      html += '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span><span class="log-path">' + l.path + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
-    });
     container.innerHTML = html;
   } else {
     container.innerHTML = filtered.map(l =>
@@ -519,8 +579,8 @@ function renderLogs() {
   }
 }
 
-function toggleMissingGroup(path) {
-  expandedMissingGroups.has(path) ? expandedMissingGroups.delete(path) : expandedMissingGroups.add(path);
+function toggleLogGroup(path) {
+  expandedLogGroups.has(path) ? expandedLogGroups.delete(path) : expandedLogGroups.add(path);
   renderLogs();
 }
 
@@ -553,8 +613,8 @@ function showLogDetail(idx) {
     return '<div style="margin-top:10px"><strong style="cursor:pointer" onclick="toggleLogHeaders(\'' + type + '\')">' + title + ' ' + (collapsed ? '▶' : '▼') + '</strong></div><div class="detail-content" style="' + (collapsed ? 'display:none;' : '') + 'max-height:150px">' + content + '</div>';
   };
 
-  const hasOverride = overrides[l.path];
-  const hasMapping = mappings[l.path];
+  const hasOverride = overrides[l.path] && overrides[l.path].enabled;
+  const hasMapping = mappings[l.path] && mappings[l.path].enabled;
   const isMissing = l.found !== true && l.found !== 'mapping';
   const isMapping = l.found === 'mapping';
   const statusText = l.found === true ? '本地' : l.found === 'mapping' ? '映射' : '404';
@@ -563,22 +623,61 @@ function showLogDetail(idx) {
   // 映射请求显示服务器返回的详细信息
   if (isMapping && l.mappingResponse) {
     const mr = l.mappingResponse;
-    let body = mr.body || '';
-    try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
+    let proxyBody = mr.body || '';
+    try { proxyBody = JSON.stringify(JSON.parse(proxyBody), null, 2); } catch { }
     const mrStatusClass = mr.status >= 200 && mr.status < 300 ? 'status-2xx' : mr.status >= 400 && mr.status < 500 ? 'status-4xx' : 'status-5xx';
     const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
     const hasPage = !!pageHeader;
+    
+    // 访问请求 Tab（客户端 -> 本地服务器）
+    let reqBodyFormatted = l.body || '';
+    try { reqBodyFormatted = JSON.stringify(JSON.parse(reqBodyFormatted), null, 2); } catch { }
+    const hasReqBody = l.body && l.body.length > 0;
+    
+    const accessTabHtml = 
+      '<div class="section-title">Response <span class="section-tag">来自映射服务器</span></div>' +
+      '<div class="detail-content"><pre>' + escapeHtml(proxyBody) + '</pre></div>' +
+      (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
+      '<div class="section-title">Request</div>' +
+      '<div class="detail-content"><table>' +
+      '<tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr>' +
+      '<tr><td>路径</td><td>' + l.path + '</td></tr>' +
+      '<tr><td>完整URL</td><td>' + (l.fullUrl || l.path) + '</td></tr>' +
+      '<tr><td>访问时间</td><td>' + l.time + '</td></tr>' +
+      '<tr><td>客户端IP</td><td>' + l.ip + '</td></tr>' +
+      '</table></div>' +
+      '<div class="section-title">Query 参数</div>' +
+      '<div class="detail-content">' + queryTable(l.query) + '</div>' +
+      '<div class="section-title">Response Headers <span class="section-tag">来自映射服务器</span></div>' +
+      '<div class="detail-content">' + headerTable(mr.headers) + '</div>' +
+      '<div class="section-title">Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</div>' +
+      '<div class="detail-content">' + headerTable(l.headers) + '</div>';
+    
+    // 映射请求 Tab（本地服务器 -> 代理服务器）
+    const proxyTabHtml = 
+      '<div class="section-title">Response</div>' +
+      '<div class="detail-content"><pre>' + escapeHtml(proxyBody) + '</pre></div>' +
+      '<div class="section-title">Request</div>' +
+      '<div class="detail-content"><table>' +
+      '<tr><td>目标URL</td><td style="word-break:break-all">' + mr.url + '</td></tr>' +
+      '<tr><td>响应状态</td><td><span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></td></tr>' +
+      '<tr><td>耗时</td><td>' + mr.time + 'ms</td></tr>' +
+      '<tr><td>响应大小</td><td>' + formatSize(mr.size) + '</td></tr>' +
+      '</table></div>' +
+      '<div class="section-title">Response Headers (' + (mr.headers ? Object.keys(mr.headers).length : 0) + ')</div>' +
+      '<div class="detail-content">' + headerTable(mr.headers) + '</div>' +
+      '<div class="section-title">Request Headers <span class="section-tag">透传访问请求</span></div>' +
+      '<div class="detail-content">' + headerTable(l.headers) + '</div>';
+    
     panel.innerHTML =
-      '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div></div>' +
-      '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">请求: ' + l.path + '</div>' +
-      '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">映射: ' + mr.url + '</div>' +
-      '<div class="meta-row"><div class="meta-item">响应状态: <span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></div><div class="meta-item">耗时: ' + mr.time + 'ms</div><div class="meta-item">大小: ' + formatSize(mr.size) + '</div></div>' +
-      '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + tabBtn('headers', 'Headers') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
-      '<div class="tab-content' + (logDetailTab === 'response' ? ' active' : '') + '"><div class="detail-content" style="max-height:250px"><pre>' + escapeHtml(body) + '</pre></div></div>' +
-      '<div class="tab-content' + (logDetailTab === 'request' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>请求信息</strong></div><div class="detail-content" style="max-height:100px;margin-bottom:10px"><table><tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr><tr><td>路径</td><td>' + l.path + '</td></tr><tr><td>映射目标</td><td>' + mr.url + '</td></tr><tr><td>访问时间</td><td>' + l.time + '</td></tr><tr><td>客户端IP</td><td>' + l.ip + '</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px">' + queryTable(l.query) + '</div></div>' +
-      '<div class="tab-content' + (logDetailTab === 'headers' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>请求 Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</strong></div><div class="detail-content" style="max-height:120px;margin-bottom:10px">' + headerTable(l.headers) + '</div><div style="margin-bottom:10px"><strong>响应 Headers (' + (mr.headers ? Object.keys(mr.headers).length : 0) + ')</strong></div><div class="detail-content" style="max-height:120px">' + headerTable(mr.headers) + '</div></div>' +
-      (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '') +
-      '<div style="margin-top:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>';
+      '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div><div class="meta-item">响应: <span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></div><div class="meta-item">耗时: ' + mr.time + 'ms</div></div>' +
+      '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">本地: ' + l.path + '</div>' +
+      '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
+      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
+      '<div class="detail-tabs">' + tabBtn('access', '访问请求') + tabBtn('proxy', '映射请求') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
+      '<div class="tab-content' + (logDetailTab === 'access' || logDetailTab === 'response' || logDetailTab === 'request' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
+      '<div class="tab-content' + (logDetailTab === 'proxy' ? ' active' : '') + '">' + proxyTabHtml + '</div>' +
+      (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '');
     panel.classList.add('active');
     renderLogs();
     return;
@@ -588,6 +687,7 @@ function showLogDetail(idx) {
   const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
   const hasPage = !!pageHeader;
   
+  // 异步获取响应内容
   fetch(l.path).then(r => {
     const resHeaders = {};
     r.headers.forEach((v, k) => resHeaders[k] = v);
@@ -600,26 +700,51 @@ function showLogDetail(idx) {
     const resHeadersEl = document.getElementById('logResHeaders');
     if (resHeadersEl) resHeadersEl.innerHTML = headerTable(resHeaders);
     window.currentLogResponse = text;
+    window.currentLogResHeaders = resHeaders;
   }).catch(() => {
     const respContent = document.getElementById('logResponseContent');
     if (respContent) respContent.innerHTML = '<em>无法加载</em>';
     window.currentLogResponse = '{}';
   });
 
+  // 本地请求详情 - 和映射详情的访问请求格式一致
+  let reqBodyFormatted = l.body || '';
+  try { reqBodyFormatted = JSON.stringify(JSON.parse(reqBodyFormatted), null, 2); } catch { }
+  const hasReqBody = l.body && l.body.length > 0;
+  
+  const localDetailHtml = 
+    '<div class="section-title">Response</div>' +
+    '<div class="detail-content" id="logResponseContent"><em>加载中...</em></div>' +
+    (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
+    '<div class="section-title">Request</div>' +
+    '<div class="detail-content"><table>' +
+    '<tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr>' +
+    '<tr><td>路径</td><td>' + l.path + '</td></tr>' +
+    '<tr><td>完整URL</td><td>' + (l.fullUrl || l.path) + '</td></tr>' +
+    '<tr><td>访问时间</td><td>' + l.time + '</td></tr>' +
+    '<tr><td>客户端IP</td><td>' + l.ip + '</td></tr>' +
+    '</table></div>' +
+    '<div class="section-title">Query 参数</div>' +
+    '<div class="detail-content">' + queryTable(l.query) + '</div>' +
+    '<div class="section-title">Response Headers</div>' +
+    '<div class="detail-content" id="logResHeaders"><em>加载中...</em></div>' +
+    '<div class="section-title">Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</div>' +
+    '<div class="detail-content">' + headerTable(l.headers) + '</div>';
+
   panel.innerHTML =
     '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status ' + statusClass + '">' + statusText + '</span></div>' + (hasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') + (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + '</div>' +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
-    '<div class="detail-tabs">' + tabBtn('response', 'Response') + tabBtn('request', 'Request') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
-    '<div class="tab-content' + (logDetailTab === 'response' ? ' active' : '') + '"><div class="detail-content" id="logResponseContent" style="max-height:200px"><em>加载中...</em></div>' + collapsible('Response Headers', '<div id="logResHeaders"><em>加载中...</em></div>', 'res') +
-    '<div style="margin-top:10px">' + 
+    '<div style="margin-bottom:10px">' + 
     (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">创建文件</button> ' : '') + 
     '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ')">修改返回</button> ' +
     '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
     (hasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
     (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + 
-    '</div></div>' +
-    '<div class="tab-content' + (logDetailTab === 'request' ? ' active' : '') + '"><div style="margin-bottom:10px"><strong>基本信息</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px"><table><tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr><tr><td>路径</td><td>' + l.path + '</td></tr><tr><td>访问时间</td><td>' + l.time + '</td></tr><tr><td>客户端IP</td><td>' + l.ip + '</td></tr></table></div><div style="margin-bottom:10px"><strong>Query 参数</strong></div><div class="detail-content" style="max-height:80px;margin-bottom:10px">' + queryTable(l.query) + '</div>' + collapsible('Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')', headerTable(l.headers), 'req') + '</div>' +
-    (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '');
+    '</div>' +
+    (hasPage ? '<div class="detail-tabs">' + tabBtn('response', '详情') + tabBtn('page', 'Page') + '</div>' +
+    '<div class="tab-content' + (logDetailTab !== 'page' ? ' active' : '') + '">' + localDetailHtml + '</div>' +
+    '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>'
+    : localDetailHtml);
   panel.classList.add('active');
   renderLogs();
 }
