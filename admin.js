@@ -450,6 +450,81 @@ function formatSize(b) {
   return b < 1024 ? b + 'B' : b < 1048576 ? (b / 1024).toFixed(1) + 'K' : (b / 1048576).toFixed(1) + 'M';
 }
 
+// 判断 content-type 是否可以直接展示
+function isDisplayableContentType(contentType) {
+  if (!contentType) return true;
+  const type = contentType.toLowerCase();
+  const displayable = [
+    'text/', 'application/json', 'application/xml', 'application/javascript',
+    'application/x-www-form-urlencoded', 'image/svg+xml'
+  ];
+  return displayable.some(t => type.includes(t));
+}
+
+// 判断是否是图片类型
+function isImageContentType(contentType) {
+  if (!contentType) return false;
+  const type = contentType.toLowerCase();
+  return type.includes('image/');
+}
+
+// 渲染响应内容（支持展示或下载）
+function renderResponseContent(body, headers, id, isBase64) {
+  const contentType = headers && (headers['content-type'] || headers['Content-Type']) || '';
+  const size = body ? body.length : 0;
+  
+  // 图片类型，直接展示
+  if (isImageContentType(contentType)) {
+    const base64Data = isBase64 ? body : btoa(body);
+    return '<div style="text-align:center;padding:10px">' +
+      '<img src="data:' + contentType.split(';')[0] + ';base64,' + base64Data + '" style="max-width:100%;max-height:400px" />' +
+      '<div style="color:#666;margin-top:10px;font-size:11px">' + escapeHtml(contentType) + ' · ' + formatSize(size) + '</div>' +
+      '</div>';
+  }
+  
+  if (!isDisplayableContentType(contentType)) {
+    // 不可展示的类型，显示下载按钮
+    return '<div style="text-align:center;padding:20px">' +
+      '<div style="color:#666;margin-bottom:10px">内容类型: ' + escapeHtml(contentType) + '</div>' +
+      '<div style="color:#666;margin-bottom:15px">大小: ' + formatSize(size) + '</div>' +
+      '<button class="btn btn-primary" onclick="downloadResponseContent(\'' + id + '\')">下载内容</button>' +
+      '</div>';
+  }
+  
+  // 可展示的类型
+  let formatted = body || '';
+  try { formatted = JSON.stringify(JSON.parse(formatted), null, 2); } catch { }
+  return '<pre>' + escapeHtml(formatted) + '</pre>';
+}
+
+// 下载响应内容
+function downloadResponseContent(logIdx) {
+  const l = logs[logIdx];
+  if (!l) return;
+  const body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+  const contentType = l.mappingResponse ? 
+    (l.mappingResponse.headers['content-type'] || l.mappingResponse.headers['Content-Type'] || 'application/octet-stream') :
+    'application/octet-stream';
+  
+  // 根据 content-type 确定文件扩展名
+  let ext = '.bin';
+  if (contentType.includes('image/png')) ext = '.png';
+  else if (contentType.includes('image/jpeg')) ext = '.jpg';
+  else if (contentType.includes('image/gif')) ext = '.gif';
+  else if (contentType.includes('image/webp')) ext = '.webp';
+  else if (contentType.includes('application/pdf')) ext = '.pdf';
+  else if (contentType.includes('application/zip')) ext = '.zip';
+  
+  const filename = l.path.replace(/\//g, '_').substring(1) + ext;
+  const blob = new Blob([body], { type: contentType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // 解析 x-bbae-page header
 // 格式: Activity>Fragment#层数*可见,Fragment#层数...
 function parsePageInfo(pageHeader) {
@@ -634,9 +709,12 @@ function showLogDetail(idx) {
     try { reqBodyFormatted = JSON.stringify(JSON.parse(reqBodyFormatted), null, 2); } catch { }
     const hasReqBody = l.body && l.body.length > 0;
     
+    // 根据 content-type 判断是否可展示
+    const responseContentHtml = renderResponseContent(mr.body, mr.headers, idx, mr.isBase64);
+    
     const accessTabHtml = 
       '<div class="section-title">Response <span class="section-tag">来自映射服务器</span></div>' +
-      '<div class="detail-content"><pre>' + escapeHtml(proxyBody) + '</pre></div>' +
+      '<div class="detail-content">' + responseContentHtml + '</div>' +
       (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
       '<div class="section-title">Request</div>' +
       '<div class="detail-content"><table>' +
@@ -654,9 +732,11 @@ function showLogDetail(idx) {
       '<div class="detail-content">' + headerTable(l.headers) + '</div>';
     
     // 映射请求 Tab（本地服务器 -> 代理服务器）
+    const proxyReqHeaders = l.proxyReqHeaders || {};
     const proxyTabHtml = 
       '<div class="section-title">Response</div>' +
-      '<div class="detail-content"><pre>' + escapeHtml(proxyBody) + '</pre></div>' +
+      '<div class="detail-content">' + responseContentHtml + '</div>' +
+      (hasReqBody ? '<div class="section-title">Request Body <span class="section-tag">透传访问请求</span></div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
       '<div class="section-title">Request</div>' +
       '<div class="detail-content"><table>' +
       '<tr><td>目标URL</td><td style="word-break:break-all">' + mr.url + '</td></tr>' +
@@ -666,8 +746,8 @@ function showLogDetail(idx) {
       '</table></div>' +
       '<div class="section-title">Response Headers (' + (mr.headers ? Object.keys(mr.headers).length : 0) + ')</div>' +
       '<div class="detail-content">' + headerTable(mr.headers) + '</div>' +
-      '<div class="section-title">Request Headers <span class="section-tag">透传访问请求</span></div>' +
-      '<div class="detail-content">' + headerTable(l.headers) + '</div>';
+      '<div class="section-title">Request Headers <span class="section-tag">实际发送</span> (' + Object.keys(proxyReqHeaders).length + ')</div>' +
+      '<div class="detail-content">' + headerTable(proxyReqHeaders) + '</div>';
     
     panel.innerHTML =
       '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div><div class="meta-item">响应: <span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></div><div class="meta-item">耗时: ' + mr.time + 'ms</div></div>' +

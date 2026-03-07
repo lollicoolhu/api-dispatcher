@@ -3,6 +3,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
 
 const PORT = 3000;
 let baseFolder = process.argv[2] || 'mock';
@@ -55,7 +56,7 @@ function saveData() {
 loadData();
 
 // 添加访问日志
-function addLog(req, found, mappingResponse = null, reqBody = null) {
+function addLog(req, found, mappingResponse = null, reqBody = null, proxyReqHeaders = null) {
   // 跳过来自管理页面的内部请求（通过referer判断）
   const referer = req.headers['referer'] || '';
   if (referer.includes('/admin')) return;
@@ -67,7 +68,7 @@ function addLog(req, found, mappingResponse = null, reqBody = null) {
   const urlObj = new URL(req.url, 'http://localhost');
   const query = {};
   urlObj.searchParams.forEach((v, k) => query[k] = v);
-  accessLogs.unshift({ time, path: urlPath, ip, found, method: req.method, fullUrl: req.url, query, headers: req.headers, mappingResponse, body: reqBody });
+  accessLogs.unshift({ time, path: urlPath, ip, found, method: req.method, fullUrl: req.url, query, headers: req.headers, mappingResponse, body: reqBody, proxyReqHeaders });
   if (accessLogs.length > MAX_LOGS) accessLogs.pop();
 }
 
@@ -495,35 +496,150 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
     const targetBase = (selected.data.target || selected.data.url).replace(/\/+$/, '');
     const targetUrl = targetBase + urlPath + queryString;
     const startTime = Date.now();
+    const parsedUrl = new URL(targetUrl);
     const protocol = targetUrl.startsWith('https') ? https : http;
-    protocol.get(targetUrl, (proxyRes) => {
-      let data = '';
-      proxyRes.on('data', chunk => data += chunk);
+    
+    // 复制请求头，替换 host、origin、referer 等
+    const proxyHeaders = {};
+    const targetHost = parsedUrl.host;
+    const targetOrigin = parsedUrl.protocol + '//' + parsedUrl.host;
+    
+    // 需要跳过的缓存相关头（避免 304）
+    const skipHeaders = ['if-none-match', 'if-modified-since'];
+    
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lowerKey = key.toLowerCase();
+      
+      // 跳过缓存头
+      if (skipHeaders.includes(lowerKey)) continue;
+      
+      if (lowerKey === 'host') {
+        proxyHeaders[key] = targetHost;
+      } else if (lowerKey === 'origin') {
+        proxyHeaders[key] = targetOrigin;
+      } else if (lowerKey === 'referer') {
+        // 替换 referer 中的 host
+        try {
+          const refererUrl = new URL(value);
+          refererUrl.host = targetHost;
+          refererUrl.protocol = parsedUrl.protocol;
+          proxyHeaders[key] = refererUrl.toString();
+        } catch {
+          proxyHeaders[key] = value;
+        }
+      } else {
+        proxyHeaders[key] = value;
+      }
+    }
+    
+    // 确保 Host 头存在
+    if (!proxyHeaders['host'] && !proxyHeaders['Host']) {
+      proxyHeaders['Host'] = targetHost;
+    }
+    
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (targetUrl.startsWith('https') ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: req.method,
+      headers: proxyHeaders
+    };
+    
+    const proxyReq = protocol.request(options, (proxyRes) => {
+      const chunks = [];
+      proxyRes.on('data', chunk => chunks.push(chunk));
       proxyRes.on('end', () => {
-        const headers = {};
-        Object.keys(proxyRes.headers).forEach(k => headers[k] = proxyRes.headers[k]);
-        const mappingResponse = {
-          status: proxyRes.statusCode,
-          url: targetUrl,
-          time: Date.now() - startTime,
-          size: data.length,
-          headers,
-          body: data,
-          sourceType: selected.type
+        let buffer = Buffer.concat(chunks);
+        const encoding = proxyRes.headers['content-encoding'];
+        const statusCode = proxyRes.statusCode;
+        
+        // 304 等无响应体的状态码直接处理
+        if (statusCode === 304 || statusCode === 204 || statusCode === 301 || statusCode === 302) {
+          const headers = {};
+          Object.keys(proxyRes.headers).forEach(k => headers[k] = proxyRes.headers[k]);
+          const mappingResponse = {
+            status: statusCode,
+            url: targetUrl,
+            time: Date.now() - startTime,
+            size: 0,
+            headers,
+            body: '',
+            isBase64: false,
+            sourceType: selected.type
+          };
+          addLog(req, 'mapping', mappingResponse, reqBody, proxyHeaders);
+          
+          Object.keys(proxyRes.headers).forEach(k => {
+            if (k !== 'transfer-encoding') res.setHeader(k, proxyRes.headers[k]);
+          });
+          res.statusCode = statusCode;
+          res.end();
+          return;
+        }
+        
+        // 解压缩
+        const decompress = (buf, callback) => {
+          if (encoding === 'gzip') {
+            zlib.gunzip(buf, callback);
+          } else if (encoding === 'deflate') {
+            zlib.inflate(buf, callback);
+          } else if (encoding === 'br') {
+            zlib.brotliDecompress(buf, callback);
+          } else {
+            callback(null, buf);
+          }
         };
-        addLog(req, 'mapping', mappingResponse, reqBody);
-        Object.keys(proxyRes.headers).forEach(k => {
-          if (k !== 'transfer-encoding') res.setHeader(k, proxyRes.headers[k]);
+        
+        decompress(buffer, (err, decompressed) => {
+          const finalBuffer = err ? buffer : decompressed;
+          const contentType = proxyRes.headers['content-type'] || '';
+          let data;
+          
+          // 图片等二进制类型转为 base64
+          if (contentType.includes('image/') || contentType.includes('application/octet-stream') || 
+              contentType.includes('application/pdf') || contentType.includes('application/zip')) {
+            data = finalBuffer.toString('base64');
+          } else {
+            data = finalBuffer.toString('utf8');
+          }
+          
+          const headers = {};
+          Object.keys(proxyRes.headers).forEach(k => headers[k] = proxyRes.headers[k]);
+          const mappingResponse = {
+            status: proxyRes.statusCode,
+            url: targetUrl,
+            time: Date.now() - startTime,
+            size: finalBuffer.length,
+            headers,
+            body: data,
+            isBase64: contentType.includes('image/') || contentType.includes('application/octet-stream') || 
+                      contentType.includes('application/pdf') || contentType.includes('application/zip'),
+            sourceType: selected.type
+          };
+          addLog(req, 'mapping', mappingResponse, reqBody, proxyHeaders);
+          
+          // 返回原始压缩数据给客户端
+          Object.keys(proxyRes.headers).forEach(k => {
+            if (k !== 'transfer-encoding') res.setHeader(k, proxyRes.headers[k]);
+          });
+          res.statusCode = proxyRes.statusCode;
+          res.end(buffer);
         });
-        res.statusCode = proxyRes.statusCode;
-        res.end(data);
       });
-    }).on('error', (e) => {
-      addLog(req, 'mapping', { status: 0, url: targetUrl, time: 0, size: 0, headers: {}, body: 'Error: ' + e.message, sourceType: selected.type }, reqBody);
+    });
+    
+    proxyReq.on('error', (e) => {
+      addLog(req, 'mapping', { status: 0, url: targetUrl, time: 0, size: 0, headers: {}, body: 'Error: ' + e.message, sourceType: selected.type }, reqBody, proxyHeaders);
       res.statusCode = 502;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: 'Mapping request failed: ' + e.message }));
     });
+    
+    // 发送请求体
+    if (reqBody) {
+      proxyReq.write(reqBody);
+    }
+    proxyReq.end();
     return;
   }
 }
