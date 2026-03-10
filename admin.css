@@ -105,3 +105,20 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 .section-title:first-child { margin-top: 0; }
 .section-tag { font-weight: normal; font-size: 11px; color: #17a2b8; margin-left: 8px; }
 .tab-content .detail-content { max-height: none; }
+
+/* 文件类型标签 */
+.file-type-tag { background: #6c757d; color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: bold; }
+.file-type-tag:empty { display: none; }
+
+/* 按页面分组样式 */
+.log-item.parent-item { background: #f0f7ff; }
+.log-item.child-item { padding-left: 25px; font-size: 11px; }
+.log-item.child-item .log-path { color: #666; }
+
+/* 不可达标记 */
+.override-item.unreachable, .mapping-item.unreachable { background: #f8d7da; border-left: 3px solid #dc3545; }
+.override-item.unreachable .path, .mapping-item.unreachable .path { color: #721c24; }
+
+/* 备注标签 */
+.remark-tag { background: #e2e3e5; color: #383d41; padding: 2px 8px; border-radius: 3px; font-size: 10px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; cursor: default; }
+.remark-tag:hover::after { content: attr(data-remark); position: absolute; left: 0; top: 100%; margin-top: 5px; background: #333; color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 11px; white-space: pre-wrap; max-width: 300px; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }

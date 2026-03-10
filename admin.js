@@ -1,13 +1,15 @@
 // 状态变量
 let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
 let logs = [], expandedLogGroups = new Set(), activeLogIdx = null, logDetailTab = 'response', logRefreshTimer = null;
-let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, globalServer = {}, currentParseFolder = '';
+let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folderMappings = {}, globalServer = {}, currentParseFolder = '';
 let modalCallback = null, mappingTestTab = 'response';
+let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
+let publicFolders = [];
 
 // 初始化
 fetch('/admin/folder').then(r => r.json()).then(d => {
   document.getElementById('current').textContent = d.folder;
-  document.getElementById('parseFolder').value = localStorage.getItem('lastParseFolder') || d.folder;
+  loadPublicFolders(d.folder);
 });
 fetch('/admin/server-info').then(r => r.json()).then(d => {
   document.getElementById('serverAddrs').innerHTML = d.addresses.map(a => 
@@ -16,22 +18,75 @@ fetch('/admin/server-info').then(r => r.json()).then(d => {
 });
 loadOverrides();
 loadMappings();
+loadFolderMappings();
 loadGlobalServer();
+loadCookieRewrite();
 
-// 文件夹选择
-document.getElementById('folderPicker').addEventListener('change', function(e) {
-  if (e.target.files.length > 0) {
-    const path = e.target.files[0].webkitRelativePath.split('/')[0];
-    document.getElementById('selectedFolder').textContent = path;
-    fetch('/admin/folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: path }) })
-      .then(r => r.json()).then(d => {
-        if (d.success) {
-          document.getElementById('current').textContent = d.folder;
-          alert('切换成功');
-        } else alert(d.error);
-      });
+// 加载 public 文件夹列表
+async function loadPublicFolders(currentFolder) {
+  const res = await fetch('/admin/public-folders');
+  const data = await res.json();
+  publicFolders = data.folders || [];
+  
+  // 更新设置页面的文件夹下拉框
+  const select = document.getElementById('folderSelect');
+  select.innerHTML = publicFolders.map(f => 
+    '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
+  ).join('');
+  
+  if (publicFolders.length === 0) {
+    select.innerHTML = '<option value="">无可用文件夹</option>';
   }
-});
+  
+  // 更新 HAR 解析页面的输出文件夹下拉框
+  const harSelect = document.getElementById('outputFolder');
+  if (harSelect) {
+    harSelect.innerHTML = publicFolders.map(f => 
+      '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
+    ).join('');
+    if (publicFolders.length === 0) {
+      harSelect.innerHTML = '<option value="public/mock">mock</option>';
+    }
+  }
+  
+  // 更新服务器页面的文件夹下拉框
+  const serverSelect = document.getElementById('serverFolderSelect');
+  if (serverSelect) {
+    serverSelect.innerHTML = publicFolders.map(f => 
+      '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
+    ).join('');
+    if (publicFolders.length === 0) {
+      serverSelect.innerHTML = '<option value="">无可用服务器</option>';
+    }
+  }
+}
+
+// 刷新文件夹列表
+async function refreshFolderList() {
+  const res = await fetch('/admin/folder');
+  const data = await res.json();
+  await loadPublicFolders(data.folder);
+}
+
+// 切换文件夹
+async function switchFolder() {
+  const folder = document.getElementById('folderSelect').value;
+  if (!folder) return;
+  
+  const res = await fetch('/admin/folder', { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify({ folder }) 
+  });
+  const data = await res.json();
+  
+  if (data.success) {
+    document.getElementById('current').textContent = data.folder;
+    alert('切换成功');
+  } else {
+    alert(data.error || '切换失败');
+  }
+}
 
 // Tab切换
 function showTab(name) {
@@ -85,6 +140,18 @@ async function updateGlobalServer() {
   globalServer = { enabled, url, priority };
 }
 
+// ========== Cookie重写 ==========
+async function loadCookieRewrite() {
+  const res = await fetch('/admin/cookie-rewrite');
+  const data = await res.json();
+  document.getElementById('cookieRewriteEnabled').checked = data.enabled !== false;
+}
+
+async function updateCookieRewrite() {
+  const enabled = document.getElementById('cookieRewriteEnabled').checked;
+  await fetch('/admin/cookie-rewrite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+}
+
 // ========== 映射管理 ==========
 let mappingTestData = null; // 缓存测试结果
 
@@ -103,11 +170,13 @@ function renderMappings() {
     const m = mappings[p];
     const isWildcard = p.endsWith('*');
     const disabled = !m.enabled;
+    const remarkHtml = m.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(m.remark) + '">' + escapeHtml(m.remark) + '</span>' : '';
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + '">' +
     '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
     '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
     '<span class="target">→ ' + m.target + '</span>' +
-    '<span class="priority" title="优先级">P' + (m.priority ?? 1) + '</span>' +
+    remarkHtml +
+    '<label style="display:flex;align-items:center;gap:3px"><span style="font-size:10px;color:#666">优先级:</span><input type="number" value="' + (m.priority ?? 1) + '" style="width:50px;padding:2px 4px;font-size:11px" onchange="updateMappingPriority(\'' + p.replace(/'/g, "\\'") + '\', this.value)" title="数字越大优先级越高"></label>' +
     '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
     '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
@@ -116,6 +185,13 @@ function renderMappings() {
 async function toggleMappingEnabled(apiPath, enabled) {
   await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, enabled }) });
   mappings[apiPath].enabled = enabled;
+  renderMappings();
+}
+
+async function updateMappingPriority(apiPath, priority) {
+  const p = parseInt(priority) || 1;
+  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, priority: p }) });
+  mappings[apiPath].priority = p;
   renderMappings();
 }
 
@@ -129,6 +205,7 @@ function openMappingModal(apiPath) {
   const m = mappings[apiPath] || {};
   document.getElementById('mappingTarget').value = m.target || '';
   document.getElementById('mappingPriority').value = m.priority ?? 1;
+  document.getElementById('mappingRemark').value = m.remark || '';
   document.getElementById('mappingTestPath').value = apiPath && !apiPath.endsWith('*') ? apiPath : '';
   document.getElementById('mappingTestResult').classList.add('hidden');
   mappingTestData = null;
@@ -144,9 +221,10 @@ async function saveMappingFromModal() {
   const apiPath = document.getElementById('mappingPath').value.trim();
   const target = document.getElementById('mappingTarget').value.trim();
   const priority = parseInt(document.getElementById('mappingPriority').value) || 1;
+  const remark = document.getElementById('mappingRemark').value.trim();
   if (!apiPath) return alert('请输入接口路径');
   if (!target) return alert('请输入映射目标地址');
-  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target, enabled: true, priority }) });
+  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target, enabled: true, priority, remark }) });
   loadMappings();
   closeMappingModal();
   if (activeLogIdx !== null) showLogDetail(activeLogIdx);
@@ -213,6 +291,86 @@ function switchMappingTestTab(tab) {
 }
 
 
+// ========== 文件夹映射管理 ==========
+async function loadFolderMappings() {
+  const res = await fetch('/admin/folder-mappings');
+  folderMappings = await res.json();
+  renderFolderMappings();
+}
+
+function renderFolderMappings() {
+  const list = document.getElementById('folderMappingList');
+  const patterns = Object.keys(folderMappings);
+  document.getElementById('folderMappingCount').textContent = '(' + patterns.length + ')';
+  if (patterns.length === 0) { list.innerHTML = '<em>无文件夹映射</em>'; return; }
+  list.innerHTML = patterns.map(p => {
+    const m = folderMappings[p];
+    const isWildcard = p.endsWith('*');
+    const disabled = !m.enabled;
+    // 检查文件夹是否存在
+    const folderExists = publicFolders.some(f => f.path === m.folder);
+    const unreachable = m.enabled && !folderExists;
+    const remarkHtml = m.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(m.remark) + '">' + escapeHtml(m.remark) + '</span>' : '';
+    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+    '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleFolderMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+    '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
+    '<span class="target">→ ' + m.folder + (unreachable ? ' <span style="color:#dc3545;font-size:10px">(不可达)</span>' : '') + '</span>' +
+    remarkHtml +
+    '<label style="display:flex;align-items:center;gap:3px"><span style="font-size:10px;color:#666">优先级:</span><input type="number" value="' + (m.priority ?? 1) + '" style="width:50px;padding:2px 4px;font-size:11px" onchange="updateFolderMappingPriority(\'' + p.replace(/'/g, "\\'") + '\', this.value)" title="数字越大优先级越高"></label>' +
+    '<button class="btn btn-sm btn-info" onclick="openFolderMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+    '<button class="btn btn-sm btn-danger" onclick="removeFolderMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+  }).join('');
+}
+
+async function toggleFolderMappingEnabled(pattern, enabled) {
+  await fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern, enabled }) });
+  folderMappings[pattern].enabled = enabled;
+  renderFolderMappings();
+}
+
+async function updateFolderMappingPriority(pattern, priority) {
+  const p = parseInt(priority) || 1;
+  await fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern, priority: p }) });
+  folderMappings[pattern].priority = p;
+}
+
+async function removeFolderMapping(pattern) {
+  await fetch('/admin/folder-mappings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern }) });
+  loadFolderMappings();
+}
+
+function openFolderMappingModal(pattern) {
+  document.getElementById('folderMappingPattern').value = pattern || '';
+  const m = folderMappings[pattern] || {};
+  document.getElementById('folderMappingPriority').value = m.priority ?? 1;
+  document.getElementById('folderMappingRemark').value = m.remark || '';
+  
+  // 填充文件夹下拉框
+  const select = document.getElementById('folderMappingFolder');
+  select.innerHTML = publicFolders.map(f => 
+    '<option value="' + f.path + '"' + (f.path === m.folder ? ' selected' : '') + '>' + f.name + ' (' + f.path + ')</option>'
+  ).join('');
+  
+  document.getElementById('folderMappingModal').classList.add('active');
+}
+
+function closeFolderMappingModal() {
+  document.getElementById('folderMappingModal').classList.remove('active');
+}
+
+async function saveFolderMappingFromModal() {
+  const pattern = document.getElementById('folderMappingPattern').value.trim();
+  const folder = document.getElementById('folderMappingFolder').value;
+  const priority = parseInt(document.getElementById('folderMappingPriority').value) || 1;
+  const remark = document.getElementById('folderMappingRemark').value.trim();
+  if (!pattern) return alert('请输入匹配路径');
+  if (!folder) return alert('请选择映射文件夹');
+  await fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern, folder, enabled: true, priority, remark }) });
+  loadFolderMappings();
+  closeFolderMappingModal();
+}
+
+
 // ========== Confirm Modal ==========
 let confirmResolveCallback = null;
 
@@ -239,7 +397,7 @@ function confirmResolve(result) {
 // ========== JSON Editor Modal ==========
 let currentModalPath = '';
 
-function openModal(title, path, content, onSave, showFileActions = false) {
+function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '') {
   document.getElementById('modalTitle').textContent = title;
   document.getElementById('modalPath').textContent = path;
   document.getElementById('jsonEditor').value = content;
@@ -251,6 +409,24 @@ function openModal(title, path, content, onSave, showFileActions = false) {
   document.getElementById('modalPermanentBtn').style.display = showFileActions ? 'inline-block' : 'none';
   document.getElementById('modalDeleteBtn').style.display = showFileActions ? 'inline-block' : 'none';
   
+  // 显示/隐藏优先级输入
+  const priorityDiv = document.getElementById('modalPriorityDiv');
+  if (showPriority) {
+    priorityDiv.style.display = 'flex';
+    document.getElementById('modalPriority').value = currentPriority;
+  } else {
+    priorityDiv.style.display = 'none';
+  }
+  
+  // 显示/隐藏备注输入
+  const remarkDiv = document.getElementById('modalRemarkDiv');
+  if (showPriority) {
+    remarkDiv.style.display = 'block';
+    document.getElementById('modalRemark').value = currentRemark || '';
+  } else {
+    remarkDiv.style.display = 'none';
+  }
+  
   document.getElementById('jsonModal').classList.add('active');
 }
 
@@ -261,6 +437,11 @@ function closeModal() {
 }
 
 function formatJson() {
+  // 只对 JSON 路径格式化
+  if (!isJsonPath(currentModalPath)) {
+    document.getElementById('jsonError').textContent = '非 JSON 文件，无需格式化';
+    return;
+  }
   const editor = document.getElementById('jsonEditor');
   try {
     editor.value = JSON.stringify(JSON.parse(editor.value), null, 2);
@@ -270,24 +451,39 @@ function formatJson() {
   }
 }
 
-document.getElementById('modalSaveBtn').onclick = function() {
+// 判断路径是否需要 JSON 格式
+function isJsonPath(path) {
+  if (!path) return true;
+  const ext = path.split('.').pop().toLowerCase();
+  const nonJsonExts = ['html', 'htm', 'js', 'css', 'txt', 'xml', 'svg', 'md'];
+  return !nonJsonExts.includes(ext);
+}
+
+document.getElementById('modalSaveBtn').onclick = async function() {
   const content = document.getElementById('jsonEditor').value;
-  try {
-    JSON.parse(content);
-    if (modalCallback) modalCallback(content);
-    closeModal();
-  } catch (e) {
-    document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
+  // 只对 JSON 路径校验格式
+  if (isJsonPath(currentModalPath)) {
+    try {
+      JSON.parse(content);
+    } catch (e) {
+      document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
+      return;
+    }
   }
+  if (modalCallback) await modalCallback(content);
+  closeModal();
 };
 
 async function savePermanentFromModal() {
   const content = document.getElementById('jsonEditor').value;
-  try {
-    JSON.parse(content);
-  } catch (e) {
-    document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
-    return;
+  // 只对 JSON 路径校验格式
+  if (isJsonPath(currentModalPath)) {
+    try {
+      JSON.parse(content);
+    } catch (e) {
+      document.getElementById('jsonError').textContent = 'JSON 格式错误: ' + e.message;
+      return;
+    }
   }
   const confirmed = await showConfirm('确定永久保存到本地文件？<br><br><span style="color:#666;font-size:12px">' + currentModalPath + '</span>', '永久保存', '保存', false);
   if (!confirmed) return;
@@ -333,10 +529,17 @@ function renderOverrides() {
   list.innerHTML = paths.map(p => {
     const o = overrides[p];
     const disabled = !o.enabled;
-    return '<div class="override-item' + (disabled ? ' disabled' : '') + '">' +
+    // 检查 JSON 是否有效（仅对 JSON 路径）
+    let jsonInvalid = false;
+    if (o.enabled && isJsonPath(p)) {
+      try { JSON.parse(o.content || ''); } catch { jsonInvalid = true; }
+    }
+    const remarkHtml = o.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(o.remark) + '">' + escapeHtml(o.remark) + '</span>' : '';
+    return '<div class="override-item' + (disabled ? ' disabled' : '') + (jsonInvalid ? ' unreachable' : '') + '">' +
     '<input type="checkbox" ' + (o.enabled ? 'checked' : '') + ' onchange="toggleOverrideEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + p + '</span>' +
-    '<span class="priority" title="优先级">P' + (o.priority ?? 1) + '</span>' +
+    '<span class="path">' + p + (jsonInvalid ? ' <span style="color:#dc3545;font-size:10px">(JSON无效)</span>' : '') + '</span>' +
+    remarkHtml +
+    '<label style="display:flex;align-items:center;gap:3px"><span style="font-size:10px;color:#666">优先级:</span><input type="number" value="' + (o.priority ?? 1) + '" style="width:50px;padding:2px 4px;font-size:11px" onchange="updateOverridePriority(\'' + p.replace(/'/g, "\\'") + '\', this.value)" title="数字越大优先级越高"></label>' +
     '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
     '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
@@ -348,6 +551,13 @@ async function toggleOverrideEnabled(path, enabled) {
   renderOverrides();
 }
 
+async function updateOverridePriority(path, priority) {
+  const p = parseInt(priority) || 1;
+  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, priority: p }) });
+  overrides[path].priority = p;
+  renderOverrides();
+}
+
 async function removeOverride(path) {
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
   loadOverrides();
@@ -355,35 +565,60 @@ async function removeOverride(path) {
 
 async function editOverride(path) {
   const o = overrides[path] || {};
-  openModal('编辑临时返回值', path, o.content || '', async (content) => {
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content }) });
+  let content = o.content || '';
+  const currentPriority = o.priority ?? 1;
+  const currentRemark = o.remark || '';
+  try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
+  openModal('编辑临时返回值', path, content, async (newContent) => {
+    const priority = parseInt(document.getElementById('modalPriority').value) || 1;
+    const remark = document.getElementById('modalRemark').value.trim();
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, priority, remark }) });
     loadOverrides();
-  });
+  }, false, true, currentPriority, currentRemark);
 }
 
 async function setTempOverride(path, originalContent, showFileActions = false) {
   const o = overrides[path] || {};
   let content = o.content || originalContent;
+  const currentPriority = o.priority ?? 1;
+  const currentRemark = o.remark || '';
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
   openModal('修改返回值', path, content, async (newContent) => {
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority: 1 }) });
+    const priority = parseInt(document.getElementById('modalPriority').value) || 1;
+    const remark = document.getElementById('modalRemark').value.trim();
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
     loadOverrides();
     if (activeLogIdx !== null) showLogDetail(activeLogIdx);
-  }, showFileActions);
+  }, showFileActions, true, currentPriority, currentRemark);
 }
 
-// ========== 本地文件管理 ==========
-async function parseLocalFolder() {
-  const folder = document.getElementById('parseFolder').value.trim();
-  if (!folder) return alert('请输入文件夹路径');
-  localStorage.setItem('lastParseFolder', folder);
+// ========== 服务器文件管理 ==========
+function initServerFolderSelect() {
+  const select = document.getElementById('serverFolderSelect');
+  const currentFolder = document.getElementById('folderSelect')?.value || '';
+  select.innerHTML = publicFolders.map(f => 
+    '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
+  ).join('');
+  if (publicFolders.length === 0) {
+    select.innerHTML = '<option value="">无可用服务器</option>';
+  }
+}
+
+async function refreshServerList() {
+  await refreshFolderList();
+  initServerFolderSelect();
+}
+
+async function parseSelectedServer() {
+  const folder = document.getElementById('serverFolderSelect').value;
+  if (!folder) return;
   currentParseFolder = folder;
   const res = await fetch('/admin/files?folder=' + encodeURIComponent(folder));
   const data = await res.json();
   if (data.error) { alert(data.error); return; }
   localFiles = data.files || [];
   document.getElementById('fileCount').textContent = localFiles.length;
-  document.getElementById('parseFolderInfo').textContent = '当前解析: ' + folder;
+  document.getElementById('parseFolderInfo').textContent = '当前: ' + folder;
   document.getElementById('fileDetailPanel').classList.remove('active');
   activeFilePath = null;
   filterFiles();
@@ -426,7 +661,7 @@ function editLocalFile(filePath) {
   openModal('永久修改文件', filePath, content, async (newContent) => {
     const res = await fetch('/admin/file/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: currentParseFolder, path: filePath, content: newContent }) });
     const result = await res.json();
-    if (result.success) { alert('保存成功'); parseLocalFolder(); }
+    if (result.success) { alert('保存成功'); parseSelectedServer(); }
     else alert('保存失败: ' + result.error);
   });
 }
@@ -443,7 +678,7 @@ async function removeOverrideAndRefresh(path) {
 
 // ========== 工具函数 ==========
 function escapeHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function formatSize(b) {
@@ -600,6 +835,7 @@ function renderLogs() {
   const search = document.getElementById('logSearch').value.toLowerCase();
   const statusFilter = document.getElementById('logStatusFilter').value;
   const groupSame = document.getElementById('logGroupSame').checked;
+  const groupByParent = document.getElementById('logGroupByParent').checked;
   let filtered = logs.map((l, i) => ({ ...l, idx: i })).filter(l => {
     if (search && !l.path.toLowerCase().includes(search)) return false;
     if (statusFilter === 'found' && l.found !== true) return false;
@@ -621,6 +857,66 @@ function renderLogs() {
     if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
     return Math.floor(diff / 86400) + '天前';
   };
+  
+  // 获取文件类型标签
+  const getFileTypeTag = (path) => {
+    const ext = path.split('.').pop().toLowerCase();
+    const types = { js: 'JS', css: 'CSS', html: 'HTML', htm: 'HTML', json: 'JSON', png: 'IMG', jpg: 'IMG', jpeg: 'IMG', gif: 'IMG', svg: 'SVG', woff: 'FONT', woff2: 'FONT', ttf: 'FONT' };
+    return types[ext] || '';
+  };
+
+  // 按父请求分组（HTML页面及其资源）
+  if (groupByParent) {
+    // 找出所有 HTML 请求作为父请求
+    const parentLogs = [];
+    const childrenMap = {}; // parentPath -> children[]
+    
+    filtered.forEach(l => {
+      const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') || 
+                     (l.mappingResponse && l.mappingResponse.headers && 
+                      (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
+      
+      if (l.parentPath && !isHtml) {
+        // 有父请求的子资源
+        if (!childrenMap[l.parentPath]) childrenMap[l.parentPath] = [];
+        childrenMap[l.parentPath].push(l);
+      } else {
+        // 父请求或无父请求的独立请求
+        parentLogs.push(l);
+      }
+    });
+    
+    let html = '';
+    parentLogs.forEach(l => {
+      const children = childrenMap[l.path] || [];
+      const hasChildren = children.length > 0;
+      const expanded = expandedLogGroups.has('parent:' + l.idx);
+      const fileType = getFileTypeTag(l.path);
+      
+      if (hasChildren) {
+        html += '<div class="group-header" onclick="toggleLogGroup(\'parent:' + l.idx + '\')">' +
+          '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
+          '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
+          (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
+          '<span class="path">' + l.path + '</span>' +
+          '<span class="badge badge-count">' + children.length + '个资源</span>' +
+          '<span style="color:#666;font-size:11px">' + formatTimeAgo(l.time) + '</span></div>';
+        html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
+        // 父请求本身
+        html += '<div class="log-item parent-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span><span style="color:#007bff">主请求</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
+        // 子资源
+        children.forEach(c => {
+          const cFileType = getFileTypeTag(c.path);
+          html += '<div class="log-item child-item' + (activeLogIdx === c.idx ? ' active' : '') + '" onclick="showLogDetail(' + c.idx + ')"><span class="log-time">' + c.time + '</span>' + (cFileType ? '<span class="file-type-tag">' + cFileType + '</span>' : '') + '<span class="log-path">' + c.path + '</span><span class="log-status ' + getStatusClass(c.found) + '">' + getStatusText(c.found) + '</span></div>';
+        });
+        html += '</div>';
+      } else {
+        html += '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span>' + (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') + '<span class="log-path">' + l.path + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
+      }
+    });
+    container.innerHTML = html;
+    return;
+  }
 
   if (groupSame) {
     // 按路径分组
@@ -634,9 +930,11 @@ function renderLogs() {
       const expanded = expandedLogGroups.has(path);
       const latest = items[0];
       const timeAgo = formatTimeAgo(latest.time);
+      const fileType = getFileTypeTag(path);
       html += '<div class="group-header" onclick="toggleLogGroup(\'' + path.replace(/'/g, "\\'") + '\')">' +
         '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
         '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
+        (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
         '<span class="path">' + path + '</span>' +
         '<span class="badge badge-count">' + items.length + '次</span>' +
         '<span style="color:#666;font-size:11px">' + timeAgo + '</span></div>';
@@ -648,9 +946,10 @@ function renderLogs() {
     }
     container.innerHTML = html;
   } else {
-    container.innerHTML = filtered.map(l =>
-      '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span><span class="log-path">' + l.path + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>'
-    ).join('');
+    container.innerHTML = filtered.map(l => {
+      const fileType = getFileTypeTag(l.path);
+      return '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span>' + (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') + '<span class="log-path">' + l.path + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
+    }).join('');
   }
 }
 
@@ -751,6 +1050,7 @@ function showLogDetail(idx) {
     
     panel.innerHTML =
       '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div><div class="meta-item">响应: <span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></div><div class="meta-item">耗时: ' + mr.time + 'ms</div></div>' +
+      (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">本地: ' + l.path + '</div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
       '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
@@ -813,6 +1113,7 @@ function showLogDetail(idx) {
 
   panel.innerHTML =
     '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status ' + statusClass + '">' + statusText + '</span></div>' + (hasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') + (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + '</div>' +
+    (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
     '<div style="margin-bottom:10px">' + 
     (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">创建文件</button> ' : '') + 
@@ -1060,7 +1361,7 @@ function showDetail(id) {
 }
 
 function getSelectedFiles() {
-  const folder = document.getElementById('outputFolder').value || 'mock';
+  const folder = document.getElementById('outputFolder').value || 'public/mock';
   const keepLast = document.getElementById('keepLast').checked;
   const pretty = document.getElementById('prettyJson').checked;
   const selected = entries.filter(e => selectedIds.has(e.id));
@@ -1084,4 +1385,170 @@ async function saveToServer() {
   const result = await res.json();
   if (result.success) alert('保存成功: ' + result.count + ' 个文件');
   else alert('保存失败: ' + result.error);
+}
+
+// ========== 日志批量保存 ==========
+function openLogBatchSave() {
+  // 填充文件夹下拉框
+  const folderSelect = document.getElementById('logBatchFolder');
+  const currentFolder = document.getElementById('folderSelect').value;
+  folderSelect.innerHTML = publicFolders.map(f => 
+    '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
+  ).join('');
+  
+  if (publicFolders.length === 0) {
+    folderSelect.innerHTML = '<option value="mock">mock</option>';
+  }
+  
+  // 按路径分组日志
+  logBatchGroups = {};
+  logs.forEach((l, idx) => {
+    const key = l.path;
+    if (!logBatchGroups[key]) {
+      logBatchGroups[key] = [];
+    }
+    logBatchGroups[key].push({ ...l, idx });
+  });
+  
+  // 默认选中映射接口的最新一条
+  logBatchSelectedIds.clear();
+  for (const [path, items] of Object.entries(logBatchGroups)) {
+    // 找到映射接口的最新一条
+    const mappingItems = items.filter(l => l.found === 'mapping');
+    if (mappingItems.length > 0) {
+      logBatchSelectedIds.add(mappingItems[0].idx);
+    } else if (items.length > 0) {
+      // 如果没有映射接口，选择最新一条
+      logBatchSelectedIds.add(items[0].idx);
+    }
+  }
+  
+  document.getElementById('logBatchGroupCount').textContent = Object.keys(logBatchGroups).length;
+  document.getElementById('logBatchSelectedCount').textContent = logBatchSelectedIds.size;
+  renderLogBatchList();
+  document.getElementById('logBatchSaveModal').classList.add('active');
+}
+
+function closeLogBatchSave() {
+  document.getElementById('logBatchSaveModal').classList.remove('active');
+}
+
+function renderLogBatchList() {
+  const container = document.getElementById('logBatchList');
+  const getStatusClass = (found) => found === true ? 'found' : found === 'mapping' ? 'mapping' : 'missing';
+  const getStatusText = (found) => found === true ? '本地' : found === 'mapping' ? '映射' : '404';
+  
+  let html = '';
+  for (const [path, items] of Object.entries(logBatchGroups)) {
+    const expanded = logBatchExpandedGroups.has(path);
+    const allSelected = items.every(l => logBatchSelectedIds.has(l.idx));
+    const someSelected = items.some(l => logBatchSelectedIds.has(l.idx));
+    const latest = items[0];
+    
+    html += '<div class="group"><div class="group-header" onclick="toggleLogBatchGroup(\'' + path.replace(/'/g, "\\'") + '\')">' +
+      '<input type="checkbox" ' + (allSelected ? 'checked' : '') + (someSelected && !allSelected ? ' style="opacity:0.5"' : '') + ' onclick="event.stopPropagation();toggleLogBatchGroupSelect(\'' + path.replace(/'/g, "\\'") + '\', this.checked)">' +
+      '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
+      '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
+      '<span class="path">' + path + '</span>' +
+      '<span class="badge badge-count">' + items.length + '</span></div>';
+    
+    html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
+    items.forEach((l, idx) => {
+      html += '<div class="item-row ' + (logBatchSelectedIds.has(l.idx) ? 'active' : '') + '" onclick="toggleLogBatchSelect(' + l.idx + ')">' +
+        '<input type="checkbox" ' + (logBatchSelectedIds.has(l.idx) ? 'checked' : '') + ' onclick="event.stopPropagation();toggleLogBatchSelect(' + l.idx + ')">' +
+        '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
+        '<span style="color:#666">#' + (idx + 1) + ' · ' + l.time + '</span></div>';
+    });
+    html += '</div></div>';
+  }
+  
+  container.innerHTML = html;
+  document.getElementById('logBatchSelectedCount').textContent = logBatchSelectedIds.size;
+}
+
+function toggleLogBatchGroup(path) {
+  logBatchExpandedGroups.has(path) ? logBatchExpandedGroups.delete(path) : logBatchExpandedGroups.add(path);
+  renderLogBatchList();
+}
+
+function toggleLogBatchGroupSelect(path, checked) {
+  logBatchGroups[path].forEach(l => checked ? logBatchSelectedIds.add(l.idx) : logBatchSelectedIds.delete(l.idx));
+  renderLogBatchList();
+}
+
+function toggleLogBatchSelect(idx) {
+  logBatchSelectedIds.has(idx) ? logBatchSelectedIds.delete(idx) : logBatchSelectedIds.add(idx);
+  renderLogBatchList();
+}
+
+function selectAllLogBatch() {
+  // 每组选择最新的映射接口，如果没有则选择最新的
+  logBatchSelectedIds.clear();
+  for (const [path, items] of Object.entries(logBatchGroups)) {
+    const mappingItems = items.filter(l => l.found === 'mapping');
+    if (mappingItems.length > 0) {
+      logBatchSelectedIds.add(mappingItems[0].idx);
+    } else if (items.length > 0) {
+      logBatchSelectedIds.add(items[0].idx);
+    }
+  }
+  renderLogBatchList();
+}
+
+function selectNoneLogBatch() {
+  logBatchSelectedIds.clear();
+  renderLogBatchList();
+}
+
+function expandAllLogBatch() {
+  Object.keys(logBatchGroups).forEach(k => logBatchExpandedGroups.add(k));
+  renderLogBatchList();
+}
+
+function collapseAllLogBatch() {
+  logBatchExpandedGroups.clear();
+  renderLogBatchList();
+}
+
+async function saveLogBatchToServer() {
+  const folder = document.getElementById('logBatchFolder').value || 'public/mock';
+  const pretty = document.getElementById('logBatchPretty').checked;
+  
+  if (logBatchSelectedIds.size === 0) {
+    alert('请先选择要保存的日志');
+    return;
+  }
+  
+  const data = {};
+  logBatchSelectedIds.forEach(idx => {
+    const l = logs[idx];
+    if (!l) return;
+    
+    let content = '';
+    if (l.found === 'mapping' && l.mappingResponse) {
+      content = l.mappingResponse.body || '{}';
+    } else {
+      // 本地文件，需要异步获取，这里先用空对象
+      content = '{}';
+    }
+    
+    // 格式化
+    if (pretty) {
+      try {
+        content = JSON.stringify(JSON.parse(content), null, 2);
+      } catch {}
+    }
+    
+    const filePath = folder + l.path + '.json';
+    data[filePath] = content;
+  });
+  
+  const res = await fetch('/admin/har/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const result = await res.json();
+  if (result.success) {
+    alert('保存成功: ' + result.count + ' 个文件');
+    closeLogBatchSave();
+  } else {
+    alert('保存失败: ' + result.error);
+  }
 }

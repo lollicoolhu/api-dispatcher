@@ -10,7 +10,7 @@
     <h1>服务器管理</h1>
     <div class="tabs">
       <button class="tab active" onclick="showTab('settings')">设置</button>
-      <button class="tab" onclick="showTab('files')">本地文件</button>
+      <button class="tab" onclick="showTab('files')">服务器</button>
       <button class="tab" onclick="showTab('har')">HAR 解析</button>
       <button class="tab" onclick="showTab('logs')">访问日志</button>
     </div>
@@ -20,11 +20,12 @@
         <div>服务器地址: <strong id="serverAddrs"></strong></div>
         <div style="margin-top:8px">当前服务文件夹: <strong id="current"></strong></div>
       </div>
-      <div style="margin:15px 0">
+      <div style="margin:15px 0;display:flex;gap:10px;align-items:center">
         <label>切换服务文件夹: </label>
-        <input type="file" id="folderPicker" webkitdirectory style="display:none">
-        <button class="btn btn-primary" onclick="document.getElementById('folderPicker').click()">选择文件夹</button>
-        <span id="selectedFolder" style="margin-left:10px;color:#666"></span>
+        <select id="folderSelect" style="flex:1;max-width:300px;padding:6px 10px" onchange="switchFolder()">
+          <option value="">加载中...</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" onclick="refreshFolderList()">刷新</button>
       </div>
       <div class="override-list">
         <h3>全局映射服务器</h3>
@@ -36,6 +37,13 @@
         </div>
       </div>
       <div class="override-list">
+        <h3>映射选项</h3>
+        <div style="display:flex;gap:20px;align-items:center;padding:10px;background:#f8f9fa;border-radius:4px">
+          <label><input type="checkbox" id="cookieRewriteEnabled" checked onchange="updateCookieRewrite()"> 重写 Set-Cookie</label>
+          <span style="color:#666;font-size:11px">(将 Domain 改为当前服务器，移除 Secure，设置 SameSite=Lax)</span>
+        </div>
+      </div>
+      <div class="override-list">
         <h3>临时修改列表 <span id="overrideCount">(0)</span></h3>
         <div id="overrideList"></div>
       </div>
@@ -43,12 +51,16 @@
         <h3>URL映射列表 <span id="mappingCount">(0)</span> <button class="btn btn-sm btn-success" onclick="openMappingModal('')" style="margin-left:10px">添加映射</button></h3>
         <div id="mappingList"></div>
       </div>
+      <div class="override-list" style="margin-top:20px">
+        <h3>文件夹映射列表 <span id="folderMappingCount">(0)</span> <button class="btn btn-sm btn-success" onclick="openFolderMappingModal('')" style="margin-left:10px">添加映射</button></h3>
+        <div id="folderMappingList"></div>
+      </div>
     </div>
 
     <div id="files" class="panel">
       <div class="filters">
-        <label>解析文件夹: <input type="text" id="parseFolder" placeholder="文件夹路径" style="width:200px"></label>
-        <button class="btn btn-primary" onclick="parseLocalFolder()">解析</button>
+        <label>选择服务器: <select id="serverFolderSelect" style="width:200px;padding:6px 10px" onchange="parseSelectedServer()"></select></label>
+        <button class="btn btn-sm btn-secondary" onclick="refreshServerList()">刷新</button>
         <input type="text" id="fileSearch" placeholder="搜索路径..." style="width:150px" oninput="filterFiles()">
       </div>
       <div class="stats"><span>文件数: <strong id="fileCount">0</strong></span><span id="parseFolderInfo"></span></div>
@@ -85,7 +97,7 @@
           <div class="list-panel">
             <div class="list-container" id="groupList"></div>
             <div class="output-config">
-              <label>输出: <input type="text" id="outputFolder" value="mock" style="width:80px"></label>
+              <label>输出: <select id="outputFolder" style="width:120px;padding:4px 8px"></select></label>
               <label><input type="checkbox" id="keepLast" checked> 保留最后</label>
               <label><input type="checkbox" id="prettyJson" checked> 格式化</label>
               <button class="btn btn-success" onclick="saveToServer()">保存到服务器</button>
@@ -106,6 +118,7 @@
           <option value="missing">不存在</option>
         </select>
         <label><input type="checkbox" id="logGroupSame" onchange="renderLogs()"> 折叠相同接口</label>
+        <label><input type="checkbox" id="logGroupByParent" onchange="renderLogs()"> 按页面分组</label>
         <label><input type="checkbox" id="logAutoRefresh" checked onchange="toggleAutoRefresh()"> 自动刷新</label>
         <label>间隔: <select id="logRefreshInterval" onchange="updateRefreshInterval()">
           <option value="500">0.5s</option>
@@ -115,6 +128,7 @@
         </select></label>
         <button class="btn btn-sm btn-secondary" onclick="refreshLogs()">刷新</button>
         <button class="btn btn-sm btn-danger" onclick="clearLogs()">清空</button>
+        <button class="btn btn-sm btn-success" onclick="openLogBatchSave()">批量保存</button>
       </div>
       <div class="stats"><span>日志数: <strong id="logCount">0</strong></span></div>
       <div class="main-layout">
@@ -133,6 +147,19 @@
       </div>
       <div class="modal-body">
         <div style="margin-bottom:10px;font-family:monospace;font-size:12px;color:#666" id="modalPath"></div>
+        <div id="modalPriorityDiv" style="display:none;margin-bottom:10px;align-items:center;gap:10px">
+          <label style="display:flex;align-items:center;gap:5px">
+            <span style="font-size:12px;color:#666">优先级:</span>
+            <input type="number" id="modalPriority" value="1" style="width:60px;padding:4px 8px;font-size:12px">
+            <span style="font-size:11px;color:#999">(数字越大优先级越高，本地文件=0)</span>
+          </label>
+        </div>
+        <div id="modalRemarkDiv" style="display:none;margin-bottom:10px">
+          <label style="display:flex;align-items:center;gap:5px">
+            <span style="font-size:12px;color:#666">备注:</span>
+            <input type="text" id="modalRemark" style="flex:1;padding:4px 8px;font-size:12px" placeholder="可选备注信息">
+          </label>
+        </div>
         <textarea class="json-editor" id="jsonEditor"></textarea>
         <div class="json-error" id="jsonError"></div>
       </div>
@@ -184,6 +211,10 @@
           <span style="color:#666;font-size:11px">(数字越大优先级越高，本地文件=0，全局服务器默认=100)</span>
         </div>
         <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">备注:</label>
+          <input type="text" id="mappingRemark" style="width:100%" placeholder="可选备注信息">
+        </div>
+        <div style="margin-bottom:15px">
           <label style="display:block;margin-bottom:5px">测试路径 (用于测试连通性):</label>
           <input type="text" id="mappingTestPath" style="width:100%" placeholder="输入具体路径测试">
         </div>
@@ -195,6 +226,68 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeMappingModal()">取消</button>
         <button class="btn btn-primary" onclick="saveMappingFromModal()">保存映射</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Folder Mapping Modal -->
+  <div class="modal" id="folderMappingModal">
+    <div class="modal-content" style="max-width:600px">
+      <div class="modal-header">
+        <h3>设置文件夹映射</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeFolderMappingModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">匹配路径 (支持通配符 * 匹配路径前缀):</label>
+          <input type="text" id="folderMappingPattern" style="width:100%" placeholder="/api/v2/*">
+          <div style="font-size:11px;color:#666;margin-top:3px">例: /api/v2/* 匹配所有以 /api/v2/ 开头的接口</div>
+        </div>
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">映射到文件夹:</label>
+          <select id="folderMappingFolder" style="width:100%;padding:6px 10px"></select>
+        </div>
+        <div style="margin-bottom:15px;display:flex;gap:20px;align-items:center">
+          <label>优先级: <input type="number" id="folderMappingPriority" value="1" style="width:60px"></label>
+          <span style="color:#666;font-size:11px">(数字越大优先级越高，当前服务文件夹=0)</span>
+        </div>
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">备注:</label>
+          <input type="text" id="folderMappingRemark" style="width:100%" placeholder="可选备注信息">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeFolderMappingModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveFolderMappingFromModal()">保存映射</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log Batch Save Modal -->
+  <div class="modal" id="logBatchSaveModal">
+    <div class="modal-content" style="max-width:1200px">
+      <div class="modal-header">
+        <h3>批量保存日志接口</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeLogBatchSave()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="filters" style="margin-bottom:10px">
+          <label>输出文件夹: <select id="logBatchFolder" style="width:150px;padding:4px 8px"></select></label>
+          <label><input type="checkbox" id="logBatchPretty" checked> 格式化JSON</label>
+          <button class="btn btn-sm btn-primary" onclick="selectAllLogBatch()">全选</button>
+          <button class="btn btn-sm btn-secondary" onclick="selectNoneLogBatch()">取消</button>
+          <button class="btn btn-sm btn-secondary" onclick="expandAllLogBatch()">展开</button>
+          <button class="btn btn-sm btn-secondary" onclick="collapseAllLogBatch()">收起</button>
+        </div>
+        <div class="stats" style="margin-bottom:10px">
+          <span>分组数: <strong id="logBatchGroupCount">0</strong></span>
+          <span>已选: <strong id="logBatchSelectedCount">0</strong></span>
+        </div>
+        <div class="list-container" id="logBatchList" style="max-height:400px;border:1px solid #ddd;border-radius:4px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeLogBatchSave()">取消</button>
+        <button class="btn btn-success" onclick="saveLogBatchToServer()">保存到服务器</button>
       </div>
     </div>
   </div>

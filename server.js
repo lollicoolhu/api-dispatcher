@@ -6,14 +6,16 @@ const os = require('os');
 const zlib = require('zlib');
 
 const PORT = 3000;
-let baseFolder = process.argv[2] || 'mock';
+let baseFolder = process.argv[2] || 'public/mock';
 let accessLogs = [];
 const MAX_LOGS = 1000;
 
 const DATA_FILE = path.join(__dirname, '.mock-server-data.json');
 let tempOverrides = {};  // { path: { content, enabled, priority } }
 let urlMappings = {};    // { path: { target, enabled, priority } }
+let folderMappings = {}; // { pattern: { folder, enabled, priority } } 本地文件夹映射
 let globalServer = { url: '', enabled: false, priority: 100 };
+let cookieRewrite = true;  // 映射时重写 Set-Cookie，移除 Domain/Secure/SameSite
 
 // 加载持久化数据
 function loadData() {
@@ -40,8 +42,10 @@ function loadData() {
           urlMappings[k] = v;
         }
       }
+      folderMappings = data.folderMappings || {};
       globalServer = data.globalServer || { url: '', enabled: false, priority: 100 };
-      console.log('Loaded ' + Object.keys(tempOverrides).length + ' overrides, ' + Object.keys(urlMappings).length + ' mappings');
+      if (data.cookieRewrite !== undefined) cookieRewrite = data.cookieRewrite;
+      console.log('Loaded ' + Object.keys(tempOverrides).length + ' overrides, ' + Object.keys(urlMappings).length + ' url mappings, ' + Object.keys(folderMappings).length + ' folder mappings');
     }
   } catch (e) { console.error('Failed to load data:', e.message); }
 }
@@ -49,11 +53,50 @@ function loadData() {
 // 保存持久化数据
 function saveData() {
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ tempOverrides, urlMappings, globalServer }, null, 2));
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ tempOverrides, urlMappings, folderMappings, globalServer, cookieRewrite }, null, 2));
   } catch (e) { console.error('Failed to save data:', e.message); }
 }
 
 loadData();
+
+// 重写 Set-Cookie header，将 Domain 改为当前服务器
+function rewriteSetCookie(cookies, reqHost) {
+  if (!cookies || !cookieRewrite) return cookies;
+  // 获取当前服务器的域名（不含端口）
+  const currentDomain = (reqHost || 'localhost').split(':')[0];
+  const rewrite = (cookie) => {
+    let result = cookie;
+    // 移除 Secure
+    result = result.replace(/;\s*Secure/gi, '');
+    // 替换或添加 Domain
+    if (/;\s*Domain=/i.test(result)) {
+      result = result.replace(/;\s*Domain=[^;]*/gi, '; Domain=' + currentDomain);
+    } else {
+      // 没有 Domain，在第一个分号后添加
+      const idx = result.indexOf(';');
+      if (idx > 0) {
+        result = result.substring(0, idx) + '; Domain=' + currentDomain + result.substring(idx);
+      } else {
+        result = result + '; Domain=' + currentDomain;
+      }
+    }
+    // 替换或添加 SameSite
+    if (/;\s*SameSite=/i.test(result)) {
+      result = result.replace(/;\s*SameSite=[^;]*/gi, '; SameSite=Lax');
+    } else {
+      result = result + '; SameSite=Lax';
+    }
+    // 替换或添加 Path
+    if (!/;\s*Path=/i.test(result)) {
+      result = result + '; Path=/';
+    }
+    return result;
+  };
+  if (Array.isArray(cookies)) {
+    return cookies.map(rewrite);
+  }
+  return rewrite(cookies);
+}
 
 // 添加访问日志
 function addLog(req, found, mappingResponse = null, reqBody = null, proxyReqHeaders = null) {
@@ -68,7 +111,30 @@ function addLog(req, found, mappingResponse = null, reqBody = null, proxyReqHead
   const urlObj = new URL(req.url, 'http://localhost');
   const query = {};
   urlObj.searchParams.forEach((v, k) => query[k] = v);
-  accessLogs.unshift({ time, path: urlPath, ip, found, method: req.method, fullUrl: req.url, query, headers: req.headers, mappingResponse, body: reqBody, proxyReqHeaders });
+  
+  // 解析 referer 获取父请求路径
+  let parentPath = null;
+  if (referer) {
+    try {
+      const refererUrl = new URL(referer);
+      parentPath = refererUrl.pathname;
+    } catch {}
+  }
+  
+  accessLogs.unshift({ 
+    time, 
+    path: urlPath, 
+    ip, 
+    found, 
+    method: req.method, 
+    fullUrl: req.url, 
+    query, 
+    headers: req.headers, 
+    mappingResponse, 
+    body: reqBody, 
+    proxyReqHeaders,
+    parentPath  // 父请求路径（通过 referer 获取）
+  });
   if (accessLogs.length > MAX_LOGS) accessLogs.pop();
 }
 
@@ -175,7 +241,9 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const { path: apiPath, content } = JSON.parse(body);
-        const filePath = path.join(baseFolder, apiPath + '.json');
+        // 根据路径判断文件扩展名，如果已有扩展名则不添加 .json
+        const hasExt = /\.[a-zA-Z0-9]+$/.test(apiPath);
+        const filePath = path.join(baseFolder, hasExt ? apiPath : apiPath + '.json');
         const dir = path.dirname(filePath);
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(filePath, content);
@@ -193,7 +261,9 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const { path: apiPath } = JSON.parse(body);
-        const filePath = path.join(baseFolder, apiPath + '.json');
+        // 根据路径判断文件扩展名
+        const hasExt = /\.[a-zA-Z0-9]+$/.test(apiPath);
+        const filePath = path.join(baseFolder, hasExt ? apiPath : apiPath + '.json');
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
           res.setHeader('Content-Type', 'application/json');
@@ -218,15 +288,16 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const { path: p, content, enabled, priority } = JSON.parse(body);
+        const { path: p, content, enabled, priority, remark } = JSON.parse(body);
         if (tempOverrides[p]) {
           // 更新现有
           if (content !== undefined) tempOverrides[p].content = content;
           if (enabled !== undefined) tempOverrides[p].enabled = enabled;
           if (priority !== undefined) tempOverrides[p].priority = priority;
+          if (remark !== undefined) tempOverrides[p].remark = remark;
         } else {
           // 新建
-          tempOverrides[p] = { content: content || '{}', enabled: enabled !== false, priority: priority ?? 1 };
+          tempOverrides[p] = { content: content || '{}', enabled: enabled !== false, priority: priority ?? 1, remark: remark || '' };
         }
         saveData();
         res.setHeader('Content-Type', 'application/json');
@@ -261,13 +332,14 @@ const server = http.createServer((req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const { path: p, target, enabled, priority } = JSON.parse(body);
+        const { path: p, target, enabled, priority, remark } = JSON.parse(body);
         if (urlMappings[p]) {
           if (target !== undefined) urlMappings[p].target = target;
           if (enabled !== undefined) urlMappings[p].enabled = enabled;
           if (priority !== undefined) urlMappings[p].priority = priority;
+          if (remark !== undefined) urlMappings[p].remark = remark;
         } else {
-          urlMappings[p] = { target: target || '', enabled: enabled !== false, priority: priority ?? 1 };
+          urlMappings[p] = { target: target || '', enabled: enabled !== false, priority: priority ?? 1, remark: remark || '' };
         }
         saveData();
         res.setHeader('Content-Type', 'application/json');
@@ -291,6 +363,48 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // API: 文件夹映射
+  if (req.url === '/admin/folder-mappings' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(folderMappings));
+    return;
+  }
+  if (req.url === '/admin/folder-mappings' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { pattern, folder, enabled, priority, remark } = JSON.parse(body);
+        if (folderMappings[pattern]) {
+          if (folder !== undefined) folderMappings[pattern].folder = folder;
+          if (enabled !== undefined) folderMappings[pattern].enabled = enabled;
+          if (priority !== undefined) folderMappings[pattern].priority = priority;
+          if (remark !== undefined) folderMappings[pattern].remark = remark;
+        } else {
+          folderMappings[pattern] = { folder: folder || '', enabled: enabled !== false, priority: priority ?? 1, remark: remark || '' };
+        }
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+  if (req.url === '/admin/folder-mappings' && req.method === 'DELETE') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { pattern } = JSON.parse(body);
+        delete folderMappings[pattern];
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
   // API: 全局服务器
   if (req.url === '/admin/global-server' && req.method === 'GET') {
     res.setHeader('Content-Type', 'application/json');
@@ -306,6 +420,27 @@ const server = http.createServer((req, res) => {
         if (data.url !== undefined) globalServer.url = data.url;
         if (data.enabled !== undefined) globalServer.enabled = data.enabled;
         if (data.priority !== undefined) globalServer.priority = data.priority;
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  // API: Cookie重写开关
+  if (req.url === '/admin/cookie-rewrite' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ enabled: cookieRewrite }));
+    return;
+  }
+  if (req.url === '/admin/cookie-rewrite' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        if (data.enabled !== undefined) cookieRewrite = data.enabled;
         saveData();
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
@@ -399,6 +534,29 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // API: 获取 public 文件夹中的子文件夹列表
+  if (req.url === '/admin/public-folders' && req.method === 'GET') {
+    const publicPath = path.join(__dirname, 'public');
+    const folders = [];
+    try {
+      if (fs.existsSync(publicPath)) {
+        const items = fs.readdirSync(publicPath);
+        for (const item of items) {
+          const fullPath = path.join(publicPath, item);
+          if (fs.statSync(fullPath).isDirectory()) {
+            // 使用正斜杠确保跨平台兼容
+            folders.push({ name: item, path: 'public/' + item });
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to read public folders:', e.message);
+    }
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ folders }));
+    return;
+  }
+
   // API: 服务器信息
   if (req.url === '/admin/server-info' && req.method === 'GET') {
     res.setHeader('Content-Type', 'application/json');
@@ -409,7 +567,11 @@ const server = http.createServer((req, res) => {
   // ========== 主请求处理 ==========
   const urlPath = req.url.replace(/\/$/, '').split('?')[0];
   const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
-  const filePath = path.join(baseFolder, urlPath + '.json');
+  
+  // 判断路径是否已有扩展名
+  const hasExt = /\.[a-zA-Z0-9]+$/.test(urlPath);
+  // 如果有扩展名，直接使用；否则添加 .json
+  const filePath = path.join(baseFolder, hasExt ? urlPath : urlPath + '.json');
   const fileExists = fs.existsSync(filePath);
 
   // 解析请求体
@@ -452,7 +614,29 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
     }
   }
   
-  // 5. 全局服务器 (优先级由用户设置，默认100)
+  // 5. 文件夹映射 (优先级由用户设置，默认1)
+  for (const [pattern, mapping] of Object.entries(folderMappings)) {
+    if (mapping.enabled && mapping.folder) {
+      let matched = false;
+      if (pattern.endsWith('*')) {
+        const prefix = pattern.slice(0, -1);
+        matched = urlPath.startsWith(prefix);
+      } else {
+        matched = urlPath === pattern || urlPath.startsWith(pattern + '/');
+      }
+      if (matched) {
+        // 检查文件夹映射的文件是否存在
+        const hasExt = /\.[a-zA-Z0-9]+$/.test(urlPath);
+        const mappedFilePath = path.join(mapping.folder, hasExt ? urlPath : urlPath + '.json');
+        if (fs.existsSync(mappedFilePath)) {
+          sources.push({ type: 'folderMapping', priority: mapping.priority ?? 1, data: mapping, filePath: mappedFilePath, pattern });
+        }
+        break;
+      }
+    }
+  }
+  
+  // 6. 全局服务器 (优先级由用户设置，默认100)
   if (globalServer.enabled && globalServer.url) {
     sources.push({ type: 'globalServer', priority: globalServer.priority ?? 100, data: globalServer });
   }
@@ -485,10 +669,23 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
     return;
   }
   
-  if (selected.type === 'localFile') {
+  if (selected.type === 'localFile' || selected.type === 'folderMapping') {
     addLog(req, true, null, reqBody);
-    res.setHeader('Content-Type', 'application/json');
-    res.end(fs.readFileSync(selected.data, 'utf8'));
+    // 根据扩展名设置 Content-Type
+    const actualFilePath = selected.type === 'folderMapping' ? selected.filePath : selected.data;
+    const ext = actualFilePath.split('.').pop().toLowerCase();
+    const mimeTypes = {
+      'json': 'application/json',
+      'html': 'text/html',
+      'htm': 'text/html',
+      'js': 'application/javascript',
+      'css': 'text/css',
+      'xml': 'application/xml',
+      'svg': 'image/svg+xml',
+      'txt': 'text/plain'
+    };
+    res.setHeader('Content-Type', (mimeTypes[ext] || 'application/octet-stream') + '; charset=utf-8');
+    res.end(fs.readFileSync(actualFilePath, 'utf8'));
     return;
   }
   
@@ -570,7 +767,17 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
           addLog(req, 'mapping', mappingResponse, reqBody, proxyHeaders);
           
           Object.keys(proxyRes.headers).forEach(k => {
-            if (k !== 'transfer-encoding') res.setHeader(k, proxyRes.headers[k]);
+            if (k === 'transfer-encoding') return;
+            if (k.toLowerCase() === 'set-cookie') {
+              const rewritten = rewriteSetCookie(proxyRes.headers[k], req.headers.host);
+              if (Array.isArray(rewritten)) {
+                rewritten.forEach(c => res.appendHeader ? res.appendHeader(k, c) : res.setHeader(k, rewritten));
+              } else {
+                res.setHeader(k, rewritten);
+              }
+            } else {
+              res.setHeader(k, proxyRes.headers[k]);
+            }
           });
           res.statusCode = statusCode;
           res.end();
@@ -620,7 +827,17 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
           
           // 返回原始压缩数据给客户端
           Object.keys(proxyRes.headers).forEach(k => {
-            if (k !== 'transfer-encoding') res.setHeader(k, proxyRes.headers[k]);
+            if (k === 'transfer-encoding') return;
+            if (k.toLowerCase() === 'set-cookie') {
+              const rewritten = rewriteSetCookie(proxyRes.headers[k], req.headers.host);
+              if (Array.isArray(rewritten)) {
+                rewritten.forEach(c => res.appendHeader ? res.appendHeader(k, c) : res.setHeader(k, rewritten));
+              } else {
+                res.setHeader(k, rewritten);
+              }
+            } else {
+              res.setHeader(k, proxyRes.headers[k]);
+            }
           });
           res.statusCode = proxyRes.statusCode;
           res.end(buffer);
