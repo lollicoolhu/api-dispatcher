@@ -1,25 +1,32 @@
 // 状态变量
 let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
 let logs = [], expandedLogGroups = new Set(), activeLogIdx = null, logDetailTab = 'response', logRefreshTimer = null;
-let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folderMappings = {}, globalServer = {}, currentParseFolder = '';
+let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folderMappings = {}, localFolders = {}, globalServers = {}, currentParseFolder = '';
 let modalCallback = null, mappingTestTab = 'response';
 let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
 let publicFolders = [];
 
 // 初始化
-fetch('/admin/folder').then(r => r.json()).then(d => {
-  document.getElementById('current').textContent = d.folder;
-  loadPublicFolders(d.folder);
-});
 fetch('/admin/server-info').then(r => r.json()).then(d => {
   document.getElementById('serverAddrs').innerHTML = d.addresses.map(a => 
     '<a href="' + a + '/admin" target="_blank" style="margin-right:10px">' + a + '</a>'
   ).join('');
 });
-loadOverrides();
-loadMappings();
-loadFolderMappings();
-loadGlobalServer();
+// 先加载所有数据，再统一渲染（因为可达性计算需要所有数据）
+Promise.all([
+  loadGlobalServers(false),
+  loadOverrides(false),
+  loadMappings(false),
+  loadFolderMappings(false),
+  loadLocalFolders(false)
+]).then(() => {
+  // 所有数据加载完成后，统一渲染
+  renderGlobalServers();
+  renderLocalFolders();
+  renderOverrides();
+  renderMappings();
+  renderFolderMappings();
+});
 loadCookieRewrite();
 
 // 加载 public 文件夹列表
@@ -27,16 +34,6 @@ async function loadPublicFolders(currentFolder) {
   const res = await fetch('/admin/public-folders');
   const data = await res.json();
   publicFolders = data.folders || [];
-  
-  // 更新设置页面的文件夹下拉框
-  const select = document.getElementById('folderSelect');
-  select.innerHTML = publicFolders.map(f => 
-    '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
-  ).join('');
-  
-  if (publicFolders.length === 0) {
-    select.innerHTML = '<option value="">无可用文件夹</option>';
-  }
   
   // 更新 HAR 解析页面的输出文件夹下拉框
   const harSelect = document.getElementById('outputFolder');
@@ -61,31 +58,116 @@ async function loadPublicFolders(currentFolder) {
   }
 }
 
-// 刷新文件夹列表
-async function refreshFolderList() {
-  const res = await fetch('/admin/folder');
+// ========== 本地文件夹管理 ==========
+async function loadLocalFolders(autoRender = true) {
+  // 先加载 public 文件夹列表
+  await loadPublicFolders();
+  
+  const res = await fetch('/admin/local-folders');
   const data = await res.json();
-  await loadPublicFolders(data.folder);
+  localFolders = data.folders || {};
+  if (autoRender) renderLocalFolders();
 }
 
-// 切换文件夹
-async function switchFolder() {
-  const folder = document.getElementById('folderSelect').value;
-  if (!folder) return;
+function renderLocalFolders() {
+  const list = document.getElementById('localFolderList');
+  const paths = Object.keys(localFolders);
+  document.getElementById('localFolderCount').textContent = '(' + paths.length + ')';
+  if (paths.length === 0) { list.innerHTML = '<em>无本地文件夹</em>'; return; }
   
-  const res = await fetch('/admin/folder', { 
-    method: 'POST', 
-    headers: { 'Content-Type': 'application/json' }, 
-    body: JSON.stringify({ folder }) 
+  // 按优先级分组，找出每个优先级的第一个文件夹
+  const priorityGroups = {};
+  paths.forEach(folderPath => {
+    const f = localFolders[folderPath];
+    if (f.enabled) {
+      const priority = f.priority ?? 0;
+      if (!priorityGroups[priority]) {
+        priorityGroups[priority] = [];
+      }
+      priorityGroups[priority].push(folderPath);
+    }
   });
-  const data = await res.json();
   
-  if (data.success) {
-    document.getElementById('current').textContent = data.folder;
-    alert('切换成功');
-  } else {
-    alert(data.error || '切换失败');
-  }
+  list.innerHTML = paths.map((folderPath, index) => {
+    const f = localFolders[folderPath];
+    const disabled = !f.enabled;
+    const priority = f.priority ?? 0;
+    const folderExists = publicFolders.some(pf => pf.path === folderPath);
+    const folderNotExists = f.enabled && !folderExists;
+    
+    // 检查是否被同优先级的其他文件夹阻挡（不是第一个）
+    let blockedBySamePriority = false;
+    if (f.enabled && !folderNotExists && priorityGroups[priority]) {
+      const sameGroup = priorityGroups[priority];
+      if (sameGroup.length > 1 && sameGroup[0] !== folderPath) {
+        blockedBySamePriority = true;
+      }
+    }
+    
+    const unreachable = folderNotExists || blockedBySamePriority;
+    const remarkHtml = f.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(f.remark) + '">' + escapeHtml(f.remark) + '</span>' : '';
+    let unreachableLabel = '';
+    if (folderNotExists) {
+      unreachableLabel = '文件夹不存在';
+    } else if (blockedBySamePriority) {
+      unreachableLabel = '同优先级(' + priority + ')已有其他文件夹';
+    }
+    
+    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+    '<input type="checkbox" ' + (f.enabled ? 'checked' : '') + ' onchange="toggleLocalFolderEnabled(\'' + folderPath.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+    '<span class="path">' + folderPath + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+    remarkHtml +
+    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+    '<button class="btn btn-sm btn-info" onclick="openLocalFolderModal(\'' + folderPath.replace(/'/g, "\\'") + '\')">编辑</button>' +
+    '<button class="btn btn-sm btn-danger" onclick="removeLocalFolder(\'' + folderPath.replace(/'/g, "\\'") + '\')">删除</button></div>';
+  }).join('');
+}
+
+async function toggleLocalFolderEnabled(folderPath, enabled) {
+  await fetch('/admin/local-folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath, enabled }) });
+  localFolders[folderPath].enabled = enabled;
+  renderLocalFolders();
+}
+
+async function removeLocalFolder(folderPath) {
+  await fetch('/admin/local-folders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath }) });
+  delete localFolders[folderPath];
+  renderLocalFolders();
+  // 刷新其他列表的可达性
+  renderOverrides();
+  renderMappings();
+  renderFolderMappings();
+}
+
+function openLocalFolderModal(folderPath) {
+  const select = document.getElementById('localFolderSelect');
+  select.innerHTML = publicFolders.map(f => 
+    '<option value="' + f.path + '"' + (f.path === folderPath ? ' selected' : '') + '>' + f.name + ' (' + f.path + ')</option>'
+  ).join('');
+  
+  const f = localFolders[folderPath] || {};
+  document.getElementById('localFolderPriority').value = f.priority ?? 0;
+  document.getElementById('localFolderRemark').value = f.remark || '';
+  document.getElementById('localFolderModal').classList.add('active');
+}
+
+function closeLocalFolderModal() {
+  document.getElementById('localFolderModal').classList.remove('active');
+}
+
+async function saveLocalFolderFromModal() {
+  const folderPath = document.getElementById('localFolderSelect').value;
+  const priority = parseInt(document.getElementById('localFolderPriority').value) || 0;
+  const remark = document.getElementById('localFolderRemark').value.trim();
+  if (!folderPath) return alert('请选择文件夹');
+  await fetch('/admin/local-folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath, enabled: true, priority, remark }) });
+  localFolders[folderPath] = { enabled: true, priority, remark };
+  renderLocalFolders();
+  // 刷新其他列表的可达性
+  renderOverrides();
+  renderMappings();
+  renderFolderMappings();
+  closeLocalFolderModal();
 }
 
 // Tab切换
@@ -124,20 +206,105 @@ document.getElementById('logList').addEventListener('scroll', function() {
 });
 
 // ========== 全局服务器 ==========
-async function loadGlobalServer() {
-  const res = await fetch('/admin/global-server');
-  globalServer = await res.json();
-  document.getElementById('globalServerEnabled').checked = globalServer.enabled || false;
-  document.getElementById('globalServerUrl').value = globalServer.url || '';
-  document.getElementById('globalServerPriority').value = globalServer.priority ?? 100;
+async function loadGlobalServers(autoRender = true) {
+  const res = await fetch('/admin/global-servers');
+  const data = await res.json();
+  globalServers = data.servers || {};
+  if (autoRender) renderGlobalServers();
 }
 
-async function updateGlobalServer() {
-  const enabled = document.getElementById('globalServerEnabled').checked;
+function renderGlobalServers() {
+  const list = document.getElementById('globalServerList');
+  const urls = Object.keys(globalServers);
+  document.getElementById('globalServerCount').textContent = '(' + urls.length + ')';
+  if (urls.length === 0) { list.innerHTML = '<em>无全局映射服务器</em>'; return; }
+  
+  // 按优先级分组，找出每个优先级的第一个服务器
+  const priorityGroups = {};
+  urls.forEach(url => {
+    const s = globalServers[url];
+    if (s.enabled) {
+      const priority = s.priority ?? 100;
+      if (!priorityGroups[priority]) {
+        priorityGroups[priority] = [];
+      }
+      priorityGroups[priority].push(url);
+    }
+  });
+  
+  list.innerHTML = urls.map(url => {
+    const s = globalServers[url];
+    const disabled = !s.enabled;
+    const priority = s.priority ?? 100;
+    
+    // 检查是否被同优先级的其他服务器阻挡（不是第一个）
+    let blockedBySamePriority = false;
+    if (s.enabled && priorityGroups[priority]) {
+      const sameGroup = priorityGroups[priority];
+      if (sameGroup.length > 1 && sameGroup[0] !== url) {
+        blockedBySamePriority = true;
+      }
+    }
+    
+    const unreachable = blockedBySamePriority;
+    const remarkHtml = s.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(s.remark) + '">' + escapeHtml(s.remark) + '</span>' : '';
+    const unreachableLabel = blockedBySamePriority ? '同优先级(' + priority + ')已有其他服务器' : '';
+    
+    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+    '<input type="checkbox" ' + (s.enabled ? 'checked' : '') + ' onchange="toggleGlobalServerEnabled(\'' + url.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+    '<span class="path">' + url + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+    remarkHtml +
+    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+    '<button class="btn btn-sm btn-info" onclick="openGlobalServerModal(\'' + url.replace(/'/g, "\\'") + '\')">编辑</button>' +
+    '<button class="btn btn-sm btn-danger" onclick="removeGlobalServer(\'' + url.replace(/'/g, "\\'") + '\')">删除</button></div>';
+  }).join('');
+}
+
+async function toggleGlobalServerEnabled(url, enabled) {
+  await fetch('/admin/global-servers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, enabled }) });
+  globalServers[url].enabled = enabled;
+  renderGlobalServers();
+  // 刷新其他列表的可达性
+  renderOverrides();
+  renderMappings();
+  renderFolderMappings();
+}
+
+async function removeGlobalServer(url) {
+  await fetch('/admin/global-servers', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+  delete globalServers[url];
+  renderGlobalServers();
+  // 刷新其他列表的可达性
+  renderOverrides();
+  renderMappings();
+  renderFolderMappings();
+}
+
+function openGlobalServerModal(url) {
+  const s = globalServers[url] || {};
+  document.getElementById('globalServerUrl').value = url || '';
+  document.getElementById('globalServerPriority').value = s.priority ?? 100;
+  document.getElementById('globalServerRemark').value = s.remark || '';
+  document.getElementById('globalServerModal').classList.add('active');
+}
+
+function closeGlobalServerModal() {
+  document.getElementById('globalServerModal').classList.remove('active');
+}
+
+async function saveGlobalServerFromModal() {
   const url = document.getElementById('globalServerUrl').value.trim();
   const priority = parseInt(document.getElementById('globalServerPriority').value) || 100;
-  await fetch('/admin/global-server', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled, url, priority }) });
-  globalServer = { enabled, url, priority };
+  const remark = document.getElementById('globalServerRemark').value.trim();
+  if (!url) return alert('请输入服务器地址');
+  await fetch('/admin/global-servers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, enabled: true, priority, remark }) });
+  globalServers[url] = { enabled: true, priority, remark };
+  renderGlobalServers();
+  // 刷新其他列表的可达性
+  renderOverrides();
+  renderMappings();
+  renderFolderMappings();
+  closeGlobalServerModal();
 }
 
 // ========== Cookie重写 ==========
@@ -155,10 +322,10 @@ async function updateCookieRewrite() {
 // ========== 映射管理 ==========
 let mappingTestData = null; // 缓存测试结果
 
-async function loadMappings() {
+async function loadMappings(autoRender = true) {
   const res = await fetch('/admin/mappings');
   mappings = await res.json();
-  renderMappings();
+  if (autoRender) renderMappings();
 }
 
 function renderMappings() {
@@ -166,17 +333,91 @@ function renderMappings() {
   const paths = Object.keys(mappings);
   document.getElementById('mappingCount').textContent = '(' + paths.length + ')';
   if (paths.length === 0) { list.innerHTML = '<em>无URL映射</em>'; return; }
+  
   list.innerHTML = paths.map(p => {
     const m = mappings[p];
     const isWildcard = p.endsWith('*');
     const disabled = !m.enabled;
+    const priority = m.priority ?? 1;
+    
+    // 收集所有可能阻挡当前路径的优先级来源
+    const blockingPriorities = [];
+    
+    // 1. 本地文件夹优先级（取所有启用的本地文件夹中的最高优先级）
+    Object.values(localFolders).forEach(lf => {
+      if (lf.enabled) {
+        blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
+      }
+    });
+    
+    // 2. 全局服务器（取所有启用的全局服务器中的最高优先级）
+    Object.values(globalServers).forEach(gs => {
+      if (gs.enabled) {
+        blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
+      }
+    });
+    
+    // 3. 同路径的临时修改（优先级更高的）
+    if (overrides[p] && overrides[p].enabled) {
+      const overridePriority = overrides[p].priority ?? 1;
+      if (overridePriority > priority) {
+        blockingPriorities.push({ type: '临时修改', priority: overridePriority });
+      }
+    }
+    
+    // 4. 同路径的其他URL映射（优先级更高的）- 只检查完全相同的路径
+    Object.keys(mappings).forEach(otherPath => {
+      if (otherPath !== p && mappings[otherPath].enabled && otherPath === p) {
+        const otherPriority = mappings[otherPath].priority ?? 1;
+        if (otherPriority > priority) {
+          blockingPriorities.push({ type: '其他URL映射', priority: otherPriority });
+        }
+      }
+    });
+    
+    // 5. 匹配的文件夹映射（优先级更高的）
+    Object.keys(folderMappings).forEach(pattern => {
+      const fm = folderMappings[pattern];
+      if (fm.enabled) {
+        let matched = false;
+        if (pattern.endsWith('*')) {
+          // 文件夹映射是通配符，检查当前路径是否匹配
+          matched = p.startsWith(pattern.slice(0, -1));
+        } else {
+          // 文件夹映射是精确路径
+          matched = p === pattern || p.startsWith(pattern + '/');
+        }
+        if (matched) {
+          const fmPriority = fm.priority ?? 1;
+          if (fmPriority > priority) {
+            blockingPriorities.push({ type: '文件夹映射', priority: fmPriority });
+          }
+        }
+      }
+    });
+    
+    // 检查是否被更高优先级阻挡
+    let blockedBy = null;
+    if (m.enabled) {
+      for (const bp of blockingPriorities) {
+        if (priority < bp.priority) {
+          if (!blockedBy || bp.priority > blockedBy.priority) {
+            blockedBy = bp;
+          }
+        }
+      }
+    }
+    
+    const unreachable = !!blockedBy;
     const remarkHtml = m.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(m.remark) + '">' + escapeHtml(m.remark) + '</span>' : '';
-    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + '">' +
+    // 简洁的不可达原因
+    const unreachableLabel = blockedBy ? '<' + blockedBy.type + '(' + blockedBy.priority + ')' : '';
+    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
     '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
     '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
-    '<span class="target">→ ' + m.target + '</span>' +
+    '<span class="target">→ ' + m.target + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
     remarkHtml +
-    '<label style="display:flex;align-items:center;gap:3px"><span style="font-size:10px;color:#666">优先级:</span><input type="number" value="' + (m.priority ?? 1) + '" style="width:50px;padding:2px 4px;font-size:11px" onchange="updateMappingPriority(\'' + p.replace(/'/g, "\\'") + '\', this.value)" title="数字越大优先级越高"></label>' +
+    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
     '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
     '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
@@ -192,7 +433,10 @@ async function updateMappingPriority(apiPath, priority) {
   const p = parseInt(priority) || 1;
   await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, priority: p }) });
   mappings[apiPath].priority = p;
+  // 刷新所有列表，因为优先级变化会影响其他项的可达性
   renderMappings();
+  renderOverrides();
+  renderFolderMappings();
 }
 
 async function removeMapping(apiPath) {
@@ -225,7 +469,11 @@ async function saveMappingFromModal() {
   if (!apiPath) return alert('请输入接口路径');
   if (!target) return alert('请输入映射目标地址');
   await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target, enabled: true, priority, remark }) });
-  loadMappings();
+  mappings[apiPath] = { target, enabled: true, priority, remark };
+  // 刷新所有列表，因为优先级变化会影响其他项的可达性
+  renderMappings();
+  renderOverrides();
+  renderFolderMappings();
   closeMappingModal();
   if (activeLogIdx !== null) showLogDetail(activeLogIdx);
 }
@@ -292,10 +540,15 @@ function switchMappingTestTab(tab) {
 
 
 // ========== 文件夹映射管理 ==========
-async function loadFolderMappings() {
+async function loadFolderMappings(autoRender = true) {
+  // 先刷新文件夹列表，确保 publicFolders 是最新的
+  const folderRes = await fetch('/admin/public-folders');
+  const folderData = await folderRes.json();
+  publicFolders = folderData.folders || [];
+  
   const res = await fetch('/admin/folder-mappings');
   folderMappings = await res.json();
-  renderFolderMappings();
+  if (autoRender) renderFolderMappings();
 }
 
 function renderFolderMappings() {
@@ -303,20 +556,131 @@ function renderFolderMappings() {
   const patterns = Object.keys(folderMappings);
   document.getElementById('folderMappingCount').textContent = '(' + patterns.length + ')';
   if (patterns.length === 0) { list.innerHTML = '<em>无文件夹映射</em>'; return; }
+  
   list.innerHTML = patterns.map(p => {
     const m = folderMappings[p];
     const isWildcard = p.endsWith('*');
     const disabled = !m.enabled;
+    const priority = m.priority ?? 1;
     // 检查文件夹是否存在
     const folderExists = publicFolders.some(f => f.path === m.folder);
-    const unreachable = m.enabled && !folderExists;
+    const folderNotExists = m.enabled && !folderExists;
+    
+    // 收集所有可能阻挡当前路径的优先级来源
+    const blockingPriorities = [];
+    
+    // 1. 本地文件夹优先级（取所有启用的本地文件夹中的最高优先级）
+    Object.values(localFolders).forEach(lf => {
+      if (lf.enabled) {
+        blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
+      }
+    });
+    
+    // 2. 全局服务器（取所有启用的全局服务器中的最高优先级）
+    Object.values(globalServers).forEach(gs => {
+      if (gs.enabled) {
+        blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
+      }
+    });
+    
+    // 3. 匹配的临时修改（优先级更高的）
+    Object.keys(overrides).forEach(overridePath => {
+      const o = overrides[overridePath];
+      if (o.enabled) {
+        let matched = false;
+        if (isWildcard) {
+          matched = overridePath.startsWith(p.slice(0, -1));
+        } else {
+          matched = overridePath === p || overridePath.startsWith(p + '/');
+        }
+        if (matched) {
+          const oPriority = o.priority ?? 1;
+          if (oPriority > priority) {
+            blockingPriorities.push({ type: '临时修改', priority: oPriority });
+          }
+        }
+      }
+    });
+    
+    // 4. 匹配的URL映射（优先级更高的）
+    Object.keys(mappings).forEach(mappingPath => {
+      const mp = mappings[mappingPath];
+      if (mp.enabled) {
+        let matched = false;
+        const mappingIsWildcard = mappingPath.endsWith('*');
+        if (isWildcard && mappingIsWildcard) {
+          const prefix1 = p.slice(0, -1);
+          const prefix2 = mappingPath.slice(0, -1);
+          matched = prefix1.startsWith(prefix2) || prefix2.startsWith(prefix1);
+        } else if (isWildcard) {
+          matched = mappingPath.startsWith(p.slice(0, -1));
+        } else if (mappingIsWildcard) {
+          matched = p.startsWith(mappingPath.slice(0, -1));
+        } else {
+          matched = mappingPath === p || mappingPath.startsWith(p + '/');
+        }
+        if (matched) {
+          const mpPriority = mp.priority ?? 1;
+          if (mpPriority > priority) {
+            blockingPriorities.push({ type: 'URL映射', priority: mpPriority });
+          }
+        }
+      }
+    });
+    
+    // 5. 其他文件夹映射（优先级更高的）
+    Object.keys(folderMappings).forEach(otherPattern => {
+      if (otherPattern !== p && folderMappings[otherPattern].enabled) {
+        const fm = folderMappings[otherPattern];
+        let conflicts = false;
+        const otherIsWildcard = otherPattern.endsWith('*');
+        if (isWildcard && otherIsWildcard) {
+          const prefix1 = p.slice(0, -1);
+          const prefix2 = otherPattern.slice(0, -1);
+          conflicts = prefix1.startsWith(prefix2) || prefix2.startsWith(prefix1);
+        } else if (isWildcard) {
+          conflicts = otherPattern.startsWith(p.slice(0, -1));
+        } else if (otherIsWildcard) {
+          conflicts = p.startsWith(otherPattern.slice(0, -1));
+        } else {
+          conflicts = p === otherPattern;
+        }
+        if (conflicts) {
+          const fmPriority = fm.priority ?? 1;
+          if (fmPriority > priority) {
+            blockingPriorities.push({ type: '其他文件夹映射', priority: fmPriority });
+          }
+        }
+      }
+    });
+    
+    // 检查是否被更高优先级阻挡
+    let blockedBy = null;
+    if (m.enabled && !folderNotExists) {
+      for (const bp of blockingPriorities) {
+        if (priority < bp.priority) {
+          if (!blockedBy || bp.priority > blockedBy.priority) {
+            blockedBy = bp;
+          }
+        }
+      }
+    }
+    
+    const unreachable = folderNotExists || blockedBy;
     const remarkHtml = m.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(m.remark) + '">' + escapeHtml(m.remark) + '</span>' : '';
+    // 简洁的不可达原因
+    let unreachableLabel = '';
+    if (folderNotExists) {
+      unreachableLabel = '文件夹不存在';
+    } else if (blockedBy) {
+      unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
+    }
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
     '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleFolderMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
     '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
-    '<span class="target">→ ' + m.folder + (unreachable ? ' <span style="color:#dc3545;font-size:10px">(不可达)</span>' : '') + '</span>' +
+    '<span class="target">→ ' + m.folder + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
     remarkHtml +
-    '<label style="display:flex;align-items:center;gap:3px"><span style="font-size:10px;color:#666">优先级:</span><input type="number" value="' + (m.priority ?? 1) + '" style="width:50px;padding:2px 4px;font-size:11px" onchange="updateFolderMappingPriority(\'' + p.replace(/'/g, "\\'") + '\', this.value)" title="数字越大优先级越高"></label>' +
+    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
     '<button class="btn btn-sm btn-info" onclick="openFolderMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
     '<button class="btn btn-sm btn-danger" onclick="removeFolderMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
@@ -332,6 +696,10 @@ async function updateFolderMappingPriority(pattern, priority) {
   const p = parseInt(priority) || 1;
   await fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern, priority: p }) });
   folderMappings[pattern].priority = p;
+  // 刷新所有列表，因为优先级变化会影响其他项的可达性
+  renderFolderMappings();
+  renderOverrides();
+  renderMappings();
 }
 
 async function removeFolderMapping(pattern) {
@@ -366,7 +734,11 @@ async function saveFolderMappingFromModal() {
   if (!pattern) return alert('请输入匹配路径');
   if (!folder) return alert('请选择映射文件夹');
   await fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern, folder, enabled: true, priority, remark }) });
-  loadFolderMappings();
+  folderMappings[pattern] = { folder, enabled: true, priority, remark };
+  // 刷新所有列表，因为优先级变化会影响其他项的可达性
+  renderFolderMappings();
+  renderOverrides();
+  renderMappings();
   closeFolderMappingModal();
 }
 
@@ -515,10 +887,10 @@ async function deleteFileFromModal() {
 }
 
 // ========== 临时覆盖管理 ==========
-async function loadOverrides() {
+async function loadOverrides(autoRender = true) {
   const res = await fetch('/admin/overrides');
   overrides = await res.json();
-  renderOverrides();
+  if (autoRender) renderOverrides();
 }
 
 function renderOverrides() {
@@ -526,20 +898,97 @@ function renderOverrides() {
   const paths = Object.keys(overrides);
   document.getElementById('overrideCount').textContent = '(' + paths.length + ')';
   if (paths.length === 0) { list.innerHTML = '<em>无临时修改</em>'; return; }
+  
   list.innerHTML = paths.map(p => {
     const o = overrides[p];
     const disabled = !o.enabled;
+    const priority = o.priority ?? 1;
     // 检查 JSON 是否有效（仅对 JSON 路径）
     let jsonInvalid = false;
     if (o.enabled && isJsonPath(p)) {
       try { JSON.parse(o.content || ''); } catch { jsonInvalid = true; }
     }
+    
+    // 收集所有可能阻挡当前路径的优先级来源
+    const blockingPriorities = [];
+    
+    // 1. 本地文件夹优先级（取所有启用的本地文件夹中的最高优先级）
+    Object.values(localFolders).forEach(lf => {
+      if (lf.enabled) {
+        blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
+      }
+    });
+    
+    // 2. 全局服务器（取所有启用的全局服务器中的最高优先级）
+    Object.values(globalServers).forEach(gs => {
+      if (gs.enabled) {
+        blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
+      }
+    });
+    
+    // 3. 同路径的其他临时修改（优先级更高的）
+    Object.keys(overrides).forEach(otherPath => {
+      if (otherPath !== p && overrides[otherPath].enabled && otherPath === p) {
+        const otherPriority = overrides[otherPath].priority ?? 1;
+        if (otherPriority > priority) {
+          blockingPriorities.push({ type: '其他临时修改', priority: otherPriority });
+        }
+      }
+    });
+    
+    // 4. 同路径的URL映射（优先级更高的）
+    if (mappings[p] && mappings[p].enabled) {
+      const mappingPriority = mappings[p].priority ?? 1;
+      if (mappingPriority > priority) {
+        blockingPriorities.push({ type: 'URL映射', priority: mappingPriority });
+      }
+    }
+    
+    // 5. 匹配的文件夹映射（优先级更高的）
+    Object.keys(folderMappings).forEach(pattern => {
+      const fm = folderMappings[pattern];
+      if (fm.enabled) {
+        let matched = false;
+        if (pattern.endsWith('*')) {
+          matched = p.startsWith(pattern.slice(0, -1));
+        } else {
+          matched = p === pattern || p.startsWith(pattern + '/');
+        }
+        if (matched) {
+          const fmPriority = fm.priority ?? 1;
+          if (fmPriority > priority) {
+            blockingPriorities.push({ type: '文件夹映射', priority: fmPriority });
+          }
+        }
+      }
+    });
+    
+    // 检查是否被更高优先级阻挡
+    let blockedBy = null;
+    if (o.enabled && !jsonInvalid) {
+      for (const bp of blockingPriorities) {
+        if (priority < bp.priority) {
+          if (!blockedBy || bp.priority > blockedBy.priority) {
+            blockedBy = bp;
+          }
+        }
+      }
+    }
+    
+    const unreachable = jsonInvalid || blockedBy;
     const remarkHtml = o.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(o.remark) + '">' + escapeHtml(o.remark) + '</span>' : '';
-    return '<div class="override-item' + (disabled ? ' disabled' : '') + (jsonInvalid ? ' unreachable' : '') + '">' +
+    // 简洁的不可达原因
+    let unreachableLabel = '';
+    if (jsonInvalid) {
+      unreachableLabel = 'JSON无效';
+    } else if (blockedBy) {
+      unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
+    }
+    return '<div class="override-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
     '<input type="checkbox" ' + (o.enabled ? 'checked' : '') + ' onchange="toggleOverrideEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + p + (jsonInvalid ? ' <span style="color:#dc3545;font-size:10px">(JSON无效)</span>' : '') + '</span>' +
+    '<span class="path">' + p + (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
     remarkHtml +
-    '<label style="display:flex;align-items:center;gap:3px"><span style="font-size:10px;color:#666">优先级:</span><input type="number" value="' + (o.priority ?? 1) + '" style="width:50px;padding:2px 4px;font-size:11px" onchange="updateOverridePriority(\'' + p.replace(/'/g, "\\'") + '\', this.value)" title="数字越大优先级越高"></label>' +
+    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
     '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
     '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
@@ -555,7 +1004,10 @@ async function updateOverridePriority(path, priority) {
   const p = parseInt(priority) || 1;
   await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, priority: p }) });
   overrides[path].priority = p;
+  // 刷新所有列表，因为优先级变化会影响其他项的可达性
   renderOverrides();
+  renderMappings();
+  renderFolderMappings();
 }
 
 async function removeOverride(path) {
@@ -573,7 +1025,11 @@ async function editOverride(path) {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, priority, remark }) });
-    loadOverrides();
+    overrides[path] = { content: newContent, enabled: o.enabled !== false, priority, remark };
+    // 刷新所有列表，因为优先级变化会影响其他项的可达性
+    renderOverrides();
+    renderMappings();
+    renderFolderMappings();
   }, false, true, currentPriority, currentRemark);
 }
 
@@ -587,7 +1043,11 @@ async function setTempOverride(path, originalContent, showFileActions = false) {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
-    loadOverrides();
+    overrides[path] = { content: newContent, enabled: true, priority, remark };
+    // 刷新所有列表，因为优先级变化会影响其他项的可达性
+    renderOverrides();
+    renderMappings();
+    renderFolderMappings();
     if (activeLogIdx !== null) showLogDetail(activeLogIdx);
   }, showFileActions, true, currentPriority, currentRemark);
 }
@@ -847,6 +1307,16 @@ function renderLogs() {
   const getStatusClass = (found) => found === true ? 'found' : found === 'mapping' ? 'mapping' : 'missing';
   const getStatusText = (found) => found === true ? '✓' : found === 'mapping' ? '⇄' : '404';
   
+  // 格式化时间为时分秒毫秒
+  const formatTime = (timeStr) => {
+    // timeStr 格式: "03/10/2026 04:30:00 PM" 或类似
+    const parts = timeStr.split(' ');
+    if (parts.length >= 2) {
+      return parts.slice(1).join(' '); // 只返回时间部分
+    }
+    return timeStr;
+  };
+  
   // 计算时间差
   const formatTimeAgo = (timeStr) => {
     const now = new Date();
@@ -863,6 +1333,51 @@ function renderLogs() {
     const ext = path.split('.').pop().toLowerCase();
     const types = { js: 'JS', css: 'CSS', html: 'HTML', htm: 'HTML', json: 'JSON', png: 'IMG', jpg: 'IMG', jpeg: 'IMG', gif: 'IMG', svg: 'SVG', woff: 'FONT', woff2: 'FONT', ttf: 'FONT' };
     return types[ext] || '';
+  };
+  
+  // 获取响应状态码
+  const getResponseCode = (l) => {
+    if (l.mappingResponse && l.mappingResponse.status) {
+      return l.mappingResponse.status;
+    }
+    return l.found === true ? 200 : l.found === 'mapping' ? null : 404;
+  };
+  
+  // 获取 Outcome 状态和内容
+  const getOutcomeInfo = (l) => {
+    if (l.mappingResponse && l.mappingResponse.body) {
+      try {
+        const data = JSON.parse(l.mappingResponse.body);
+        if (data.Outcome) {
+          const isSuccess = data.Outcome.toLowerCase() === 'success';
+          return { 
+            class: isSuccess ? 'outcome-success' : 'outcome-fail',
+            text: isSuccess ? '' : data.Outcome
+          };
+        }
+      } catch {}
+    }
+    return { class: '', text: '' };
+  };
+  
+  // 渲染单个日志项
+  const renderLogItem = (l, showPath = true, isChild = false) => {
+    const method = l.method || 'GET';
+    const respCode = getResponseCode(l);
+    const outcomeInfo = getOutcomeInfo(l);
+    const fileType = getFileTypeTag(l.path);
+    const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+    const folderTag = l.matchedFolder && l.found === true ? '<span class="folder-tag">' + escapeHtml(l.matchedFolder) + '</span>' : '';
+    
+    return '<div class="log-item' + (isChild ? ' child-item' : '') + (activeLogIdx === l.idx ? ' active' : '') + ' ' + outcomeInfo.class + '" onclick="showLogDetail(' + l.idx + ')">' +
+      '<span class="log-time">' + formatTime(l.time) + '</span>' +
+      '<span class="method method-' + method + '">' + method + '</span>' +
+      (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
+      '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
+      folderTag +
+      (outcomeInfo.text ? '<span class="outcome-text">' + escapeHtml(outcomeInfo.text) + '</span>' : '') +
+      (showPath ? (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') + '<span class="log-path">' + l.path + '</span>' : '<span class="log-ip">' + l.ip + '</span>') +
+      '</div>';
   };
 
   // 按父请求分组（HTML页面及其资源）
@@ -892,10 +1407,15 @@ function renderLogs() {
       const hasChildren = children.length > 0;
       const expanded = expandedLogGroups.has('parent:' + l.idx);
       const fileType = getFileTypeTag(l.path);
+      const method = l.method || 'GET';
+      const respCode = getResponseCode(l);
+      const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
       
       if (hasChildren) {
         html += '<div class="group-header" onclick="toggleLogGroup(\'parent:' + l.idx + '\')">' +
           '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
+          '<span class="method method-' + method + '">' + method + '</span>' +
+          (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
           '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
           (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
           '<span class="path">' + l.path + '</span>' +
@@ -903,15 +1423,14 @@ function renderLogs() {
           '<span style="color:#666;font-size:11px">' + formatTimeAgo(l.time) + '</span></div>';
         html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
         // 父请求本身
-        html += '<div class="log-item parent-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span><span style="color:#007bff">主请求</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
+        html += renderLogItem(l, false);
         // 子资源
         children.forEach(c => {
-          const cFileType = getFileTypeTag(c.path);
-          html += '<div class="log-item child-item' + (activeLogIdx === c.idx ? ' active' : '') + '" onclick="showLogDetail(' + c.idx + ')"><span class="log-time">' + c.time + '</span>' + (cFileType ? '<span class="file-type-tag">' + cFileType + '</span>' : '') + '<span class="log-path">' + c.path + '</span><span class="log-status ' + getStatusClass(c.found) + '">' + getStatusText(c.found) + '</span></div>';
+          html += renderLogItem(c, true, true);
         });
         html += '</div>';
       } else {
-        html += '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span>' + (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') + '<span class="log-path">' + l.path + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
+        html += renderLogItem(l, true);
       }
     });
     container.innerHTML = html;
@@ -931,8 +1450,14 @@ function renderLogs() {
       const latest = items[0];
       const timeAgo = formatTimeAgo(latest.time);
       const fileType = getFileTypeTag(path);
+      const method = latest.method || 'GET';
+      const respCode = getResponseCode(latest);
+      const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+      
       html += '<div class="group-header" onclick="toggleLogGroup(\'' + path.replace(/'/g, "\\'") + '\')">' +
         '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
+        '<span class="method method-' + method + '">' + method + '</span>' +
+        (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
         '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
         (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
         '<span class="path">' + path + '</span>' +
@@ -940,16 +1465,13 @@ function renderLogs() {
         '<span style="color:#666;font-size:11px">' + timeAgo + '</span></div>';
       html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
       items.forEach(l => {
-        html += '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
+        html += renderLogItem(l, false);
       });
       html += '</div>';
     }
     container.innerHTML = html;
   } else {
-    container.innerHTML = filtered.map(l => {
-      const fileType = getFileTypeTag(l.path);
-      return '<div class="log-item' + (activeLogIdx === l.idx ? ' active' : '') + '" onclick="showLogDetail(' + l.idx + ')"><span class="log-time">' + l.time + '</span><span class="log-ip">' + l.ip + '</span>' + (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') + '<span class="log-path">' + l.path + '</span><span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span></div>';
-    }).join('');
+    container.innerHTML = filtered.map(l => renderLogItem(l, true)).join('');
   }
 }
 

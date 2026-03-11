@@ -18,23 +18,14 @@
     <div id="settings" class="panel active">
       <div class="status">
         <div>服务器地址: <strong id="serverAddrs"></strong></div>
-        <div style="margin-top:8px">当前服务文件夹: <strong id="current"></strong></div>
-      </div>
-      <div style="margin:15px 0;display:flex;gap:10px;align-items:center">
-        <label>切换服务文件夹: </label>
-        <select id="folderSelect" style="flex:1;max-width:300px;padding:6px 10px" onchange="switchFolder()">
-          <option value="">加载中...</option>
-        </select>
-        <button class="btn btn-secondary btn-sm" onclick="refreshFolderList()">刷新</button>
       </div>
       <div class="override-list">
-        <h3>全局映射服务器</h3>
-        <div style="display:flex;gap:10px;align-items:center;padding:10px;background:#f8f9fa;border-radius:4px">
-          <label><input type="checkbox" id="globalServerEnabled" onchange="updateGlobalServer()"> 启用</label>
-          <input type="text" id="globalServerUrl" placeholder="https://api.example.com" style="flex:1" onchange="updateGlobalServer()">
-          <label>优先级: <input type="number" id="globalServerPriority" value="100" style="width:60px" onchange="updateGlobalServer()"></label>
-          <span style="color:#666;font-size:11px">(数字越大优先级越高，本地文件=0)</span>
-        </div>
+        <h3>本地文件夹列表 <span id="localFolderCount">(0)</span> <button class="btn btn-sm btn-success" onclick="openLocalFolderModal('')" style="margin-left:10px">添加文件夹</button></h3>
+        <div id="localFolderList"></div>
+      </div>
+      <div class="override-list">
+        <h3>全局映射服务器列表 <span id="globalServerCount">(0)</span> <button class="btn btn-sm btn-success" onclick="openGlobalServerModal('')" style="margin-left:10px">添加服务器</button></h3>
+        <div id="globalServerList"></div>
       </div>
       <div class="override-list">
         <h3>映射选项</h3>
@@ -249,7 +240,7 @@
         </div>
         <div style="margin-bottom:15px;display:flex;gap:20px;align-items:center">
           <label>优先级: <input type="number" id="folderMappingPriority" value="1" style="width:60px"></label>
-          <span style="color:#666;font-size:11px">(数字越大优先级越高，当前服务文件夹=0)</span>
+          <span style="color:#666;font-size:11px">(数字越大优先级越高)</span>
         </div>
         <div style="margin-bottom:15px">
           <label style="display:block;margin-bottom:5px">备注:</label>
@@ -259,6 +250,62 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeFolderMappingModal()">取消</button>
         <button class="btn btn-primary" onclick="saveFolderMappingFromModal()">保存映射</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Local Folder Modal -->
+  <div class="modal" id="localFolderModal">
+    <div class="modal-content" style="max-width:600px">
+      <div class="modal-header">
+        <h3>设置本地文件夹</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeLocalFolderModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">选择文件夹:</label>
+          <select id="localFolderSelect" style="width:100%;padding:6px 10px"></select>
+        </div>
+        <div style="margin-bottom:15px;display:flex;gap:20px;align-items:center">
+          <label>优先级: <input type="number" id="localFolderPriority" value="0" style="width:60px"></label>
+          <span style="color:#666;font-size:11px">(数字越大优先级越高，建议使用负数或0)</span>
+        </div>
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">备注:</label>
+          <input type="text" id="localFolderRemark" style="width:100%" placeholder="可选备注信息">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeLocalFolderModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveLocalFolderFromModal()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Global Server Modal -->
+  <div class="modal" id="globalServerModal">
+    <div class="modal-content" style="max-width:600px">
+      <div class="modal-header">
+        <h3>设置全局映射服务器</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeGlobalServerModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">服务器地址 (完整URL):</label>
+          <input type="text" id="globalServerUrl" placeholder="https://api.example.com" style="width:100%">
+        </div>
+        <div style="margin-bottom:15px;display:flex;gap:20px;align-items:center">
+          <label>优先级: <input type="number" id="globalServerPriority" value="100" style="width:60px"></label>
+          <span style="color:#666;font-size:11px">(数字越大优先级越高，建议使用较大值如100)</span>
+        </div>
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">备注:</label>
+          <input type="text" id="globalServerRemark" style="width:100%" placeholder="可选备注信息">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeGlobalServerModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveGlobalServerFromModal()">保存</button>
       </div>
     </div>
   </div>

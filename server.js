@@ -14,7 +14,8 @@ const DATA_FILE = path.join(__dirname, '.mock-server-data.json');
 let tempOverrides = {};  // { path: { content, enabled, priority } }
 let urlMappings = {};    // { path: { target, enabled, priority } }
 let folderMappings = {}; // { pattern: { folder, enabled, priority } } 本地文件夹映射
-let globalServer = { url: '', enabled: false, priority: 100 };
+let localFolders = {};   // { path: { enabled, priority, remark } } 本地文件夹列表
+let globalServers = {};  // { url: { enabled, priority, remark } } 全局映射服务器列表
 let cookieRewrite = true;  // 映射时重写 Set-Cookie，移除 Domain/Secure/SameSite
 
 // 加载持久化数据
@@ -43,9 +44,18 @@ function loadData() {
         }
       }
       folderMappings = data.folderMappings || {};
-      globalServer = data.globalServer || { url: '', enabled: false, priority: 100 };
+      localFolders = data.localFolders || {};
+      globalServers = data.globalServers || {};
+      // 兼容旧的单个 globalServer 格式
+      if (!data.globalServers && data.globalServer && data.globalServer.url) {
+        globalServers[data.globalServer.url] = {
+          enabled: data.globalServer.enabled !== false,
+          priority: data.globalServer.priority ?? 100,
+          remark: data.globalServer.remark || ''
+        };
+      }
       if (data.cookieRewrite !== undefined) cookieRewrite = data.cookieRewrite;
-      console.log('Loaded ' + Object.keys(tempOverrides).length + ' overrides, ' + Object.keys(urlMappings).length + ' url mappings, ' + Object.keys(folderMappings).length + ' folder mappings');
+      console.log('Loaded ' + Object.keys(tempOverrides).length + ' overrides, ' + Object.keys(urlMappings).length + ' url mappings, ' + Object.keys(folderMappings).length + ' folder mappings, ' + Object.keys(localFolders).length + ' local folders, ' + Object.keys(globalServers).length + ' global servers');
     }
   } catch (e) { console.error('Failed to load data:', e.message); }
 }
@@ -53,7 +63,7 @@ function loadData() {
 // 保存持久化数据
 function saveData() {
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ tempOverrides, urlMappings, folderMappings, globalServer, cookieRewrite }, null, 2));
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ tempOverrides, urlMappings, folderMappings, localFolders, globalServers, cookieRewrite }, null, 2));
   } catch (e) { console.error('Failed to save data:', e.message); }
 }
 
@@ -99,13 +109,13 @@ function rewriteSetCookie(cookies, reqHost) {
 }
 
 // 添加访问日志
-function addLog(req, found, mappingResponse = null, reqBody = null, proxyReqHeaders = null) {
+function addLog(req, found, mappingResponse = null, reqBody = null, proxyReqHeaders = null, matchedFolder = null) {
   // 跳过来自管理页面的内部请求（通过referer判断）
   const referer = req.headers['referer'] || '';
   if (referer.includes('/admin')) return;
   
   const now = new Date();
-  const time = now.toLocaleString('zh-CN', { hour12: false });
+  const time = now.toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
   const urlPath = req.url.replace(/\/$/, '').split('?')[0];
   const urlObj = new URL(req.url, 'http://localhost');
@@ -133,7 +143,8 @@ function addLog(req, found, mappingResponse = null, reqBody = null, proxyReqHead
     mappingResponse, 
     body: reqBody, 
     proxyReqHeaders,
-    parentPath  // 父请求路径（通过 referer 获取）
+    parentPath,  // 父请求路径（通过 referer 获取）
+    matchedFolder  // 匹配到的文件夹名称
   });
   if (accessLogs.length > MAX_LOGS) accessLogs.pop();
 }
@@ -405,21 +416,80 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // API: 全局服务器
-  if (req.url === '/admin/global-server' && req.method === 'GET') {
+  // API: 本地文件夹
+  if (req.url === '/admin/local-folders' && req.method === 'GET') {
     res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify(globalServer));
+    res.end(JSON.stringify({ folders: localFolders }));
     return;
   }
-  if (req.url === '/admin/global-server' && req.method === 'POST') {
+  if (req.url === '/admin/local-folders' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const data = JSON.parse(body);
-        if (data.url !== undefined) globalServer.url = data.url;
-        if (data.enabled !== undefined) globalServer.enabled = data.enabled;
-        if (data.priority !== undefined) globalServer.priority = data.priority;
+        const { path: folderPath, enabled, priority, remark } = JSON.parse(body);
+        if (localFolders[folderPath]) {
+          if (enabled !== undefined) localFolders[folderPath].enabled = enabled;
+          if (priority !== undefined) localFolders[folderPath].priority = priority;
+          if (remark !== undefined) localFolders[folderPath].remark = remark;
+        } else {
+          localFolders[folderPath] = { enabled: enabled !== false, priority: priority ?? 0, remark: remark || '' };
+        }
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+  if (req.url === '/admin/local-folders' && req.method === 'DELETE') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { path: folderPath } = JSON.parse(body);
+        delete localFolders[folderPath];
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  // API: 全局服务器
+  if (req.url === '/admin/global-servers' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ servers: globalServers }));
+    return;
+  }
+  if (req.url === '/admin/global-servers' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { url, enabled, priority, remark } = JSON.parse(body);
+        if (globalServers[url]) {
+          if (enabled !== undefined) globalServers[url].enabled = enabled;
+          if (priority !== undefined) globalServers[url].priority = priority;
+          if (remark !== undefined) globalServers[url].remark = remark;
+        } else {
+          globalServers[url] = { enabled: enabled !== false, priority: priority ?? 100, remark: remark || '' };
+        }
+        saveData();
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true }));
+      } catch (e) { res.statusCode = 400; res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+  if (req.url === '/admin/global-servers' && req.method === 'DELETE') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { url } = JSON.parse(body);
+        delete globalServers[url];
         saveData();
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true }));
@@ -598,8 +668,19 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
     sources.push({ type: 'exactMapping', priority: exactMapping.priority ?? 1, data: exactMapping });
   }
   
-  // 3. 本地文件 (优先级0)
-  if (fileExists) {
+  // 3. 本地文件夹 (优先级由用户设置，默认0)
+  // 检查所有启用的本地文件夹
+  for (const [folderPath, folderConfig] of Object.entries(localFolders)) {
+    if (folderConfig.enabled) {
+      const hasExt = /\.[a-zA-Z0-9]+$/.test(urlPath);
+      const localFilePath = path.join(folderPath, hasExt ? urlPath : urlPath + '.json');
+      if (fs.existsSync(localFilePath)) {
+        sources.push({ type: 'localFolder', priority: folderConfig.priority ?? 0, data: folderConfig, filePath: localFilePath, folderPath });
+      }
+    }
+  }
+  // 如果没有配置本地文件夹，使用默认的baseFolder（优先级0）
+  if (fileExists && Object.keys(localFolders).length === 0) {
     sources.push({ type: 'localFile', priority: 0, data: filePath });
   }
   
@@ -637,12 +718,21 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
   }
   
   // 6. 全局服务器 (优先级由用户设置，默认100)
-  if (globalServer.enabled && globalServer.url) {
-    sources.push({ type: 'globalServer', priority: globalServer.priority ?? 100, data: globalServer });
+  for (const [url, serverConfig] of Object.entries(globalServers)) {
+    if (serverConfig.enabled && url) {
+      sources.push({ type: 'globalServer', priority: serverConfig.priority ?? 100, data: { url, ...serverConfig } });
+    }
   }
   
   // 按优先级排序（数字越大优先级越高）
-  sources.sort((a, b) => b.priority - a.priority);
+  // 当优先级相同时，按类型顺序：override > exactMapping > localFolder > wildcardMapping > folderMapping > globalServer
+  const typeOrder = { override: 0, exactMapping: 1, localFolder: 2, localFile: 2, wildcardMapping: 3, folderMapping: 4, globalServer: 5 };
+  sources.sort((a, b) => {
+    if (b.priority !== a.priority) {
+      return b.priority - a.priority;
+    }
+    return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
+  });
   
   // 选择优先级最高的源
   const selected = sources[0];
@@ -663,16 +753,23 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
   
   // 根据选中的源返回响应
   if (selected.type === 'override') {
-    addLog(req, true, null, reqBody);
+    addLog(req, true, null, reqBody, null, '临时修改');
     res.setHeader('Content-Type', 'application/json');
     res.end(selected.data.content);
     return;
   }
   
-  if (selected.type === 'localFile' || selected.type === 'folderMapping') {
-    addLog(req, true, null, reqBody);
+  if (selected.type === 'localFile' || selected.type === 'localFolder' || selected.type === 'folderMapping') {
+    // 获取文件夹名称
+    let folderName = baseFolder.split('/').pop();
+    if (selected.type === 'localFolder') {
+      folderName = selected.folderPath.split('/').pop();
+    } else if (selected.type === 'folderMapping') {
+      folderName = selected.data.folder.split('/').pop();
+    }
+    addLog(req, true, null, reqBody, null, folderName);
     // 根据扩展名设置 Content-Type
-    const actualFilePath = selected.type === 'folderMapping' ? selected.filePath : selected.data;
+    const actualFilePath = (selected.type === 'folderMapping' || selected.type === 'localFolder') ? selected.filePath : selected.data;
     const ext = actualFilePath.split('.').pop().toLowerCase();
     const mimeTypes = {
       'json': 'application/json',
