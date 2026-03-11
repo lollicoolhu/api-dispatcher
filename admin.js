@@ -557,6 +557,20 @@ function renderFolderMappings() {
   document.getElementById('folderMappingCount').textContent = '(' + patterns.length + ')';
   if (patterns.length === 0) { list.innerHTML = '<em>无文件夹映射</em>'; return; }
   
+  // 判断 patternA 的匹配范围是否完全覆盖 patternB（两者都是“路径子树”匹配：等于或以其为前缀）
+  const normalizeRoot = (pattern) => {
+    if (!pattern) return '';
+    let root = pattern.endsWith('*') ? pattern.slice(0, -1) : pattern;
+    if (root.endsWith('/') && root.length > 1) root = root.slice(0, -1);
+    return root;
+  };
+  const coversAll = (blockerPattern, currentPattern) => {
+    const b = normalizeRoot(blockerPattern);
+    const c = normalizeRoot(currentPattern);
+    if (!b || !c) return false;
+    return c === b || c.startsWith(b + '/');
+  };
+
   list.innerHTML = patterns.map(p => {
     const m = folderMappings[p];
     const isWildcard = p.endsWith('*');
@@ -587,17 +601,10 @@ function renderFolderMappings() {
     Object.keys(overrides).forEach(overridePath => {
       const o = overrides[overridePath];
       if (o.enabled) {
-        let matched = false;
-        if (isWildcard) {
-          matched = overridePath.startsWith(p.slice(0, -1));
-        } else {
-          matched = overridePath === p || overridePath.startsWith(p + '/');
-        }
-        if (matched) {
-          const oPriority = o.priority ?? 1;
-          if (oPriority > priority) {
-            blockingPriorities.push({ type: '临时修改', priority: oPriority });
-          }
+        // 临时修改一般是“单个接口”覆盖，只会影响该接口本身；只有当其覆盖范围能完全覆盖当前文件夹映射时，才算“阻挡整条规则”
+        const oPriority = o.priority ?? 1;
+        if (oPriority > priority && coversAll(overridePath, p)) {
+          blockingPriorities.push({ type: '临时修改', priority: oPriority });
         }
       }
     });
@@ -606,24 +613,10 @@ function renderFolderMappings() {
     Object.keys(mappings).forEach(mappingPath => {
       const mp = mappings[mappingPath];
       if (mp.enabled) {
-        let matched = false;
-        const mappingIsWildcard = mappingPath.endsWith('*');
-        if (isWildcard && mappingIsWildcard) {
-          const prefix1 = p.slice(0, -1);
-          const prefix2 = mappingPath.slice(0, -1);
-          matched = prefix1.startsWith(prefix2) || prefix2.startsWith(prefix1);
-        } else if (isWildcard) {
-          matched = mappingPath.startsWith(p.slice(0, -1));
-        } else if (mappingIsWildcard) {
-          matched = p.startsWith(mappingPath.slice(0, -1));
-        } else {
-          matched = mappingPath === p || mappingPath.startsWith(p + '/');
-        }
-        if (matched) {
-          const mpPriority = mp.priority ?? 1;
-          if (mpPriority > priority) {
-            blockingPriorities.push({ type: 'URL映射', priority: mpPriority });
-          }
+        const mpPriority = mp.priority ?? 1;
+        // 只有当该 URL 映射的覆盖范围能完全覆盖当前文件夹映射的命中范围时，才会让当前文件夹映射“整体不可达”
+        if (mpPriority > priority && coversAll(mappingPath, p)) {
+          blockingPriorities.push({ type: 'URL映射', priority: mpPriority });
         }
       }
     });
@@ -632,24 +625,10 @@ function renderFolderMappings() {
     Object.keys(folderMappings).forEach(otherPattern => {
       if (otherPattern !== p && folderMappings[otherPattern].enabled) {
         const fm = folderMappings[otherPattern];
-        let conflicts = false;
-        const otherIsWildcard = otherPattern.endsWith('*');
-        if (isWildcard && otherIsWildcard) {
-          const prefix1 = p.slice(0, -1);
-          const prefix2 = otherPattern.slice(0, -1);
-          conflicts = prefix1.startsWith(prefix2) || prefix2.startsWith(prefix1);
-        } else if (isWildcard) {
-          conflicts = otherPattern.startsWith(p.slice(0, -1));
-        } else if (otherIsWildcard) {
-          conflicts = p.startsWith(otherPattern.slice(0, -1));
-        } else {
-          conflicts = p === otherPattern;
-        }
-        if (conflicts) {
-          const fmPriority = fm.priority ?? 1;
-          if (fmPriority > priority) {
-            blockingPriorities.push({ type: '其他文件夹映射', priority: fmPriority });
-          }
+        const fmPriority = fm.priority ?? 1;
+        // 只在“对方覆盖范围完全包含当前范围”时才算阻挡（部分重叠不应导致整条规则不可达）
+        if (fmPriority > priority && coversAll(otherPattern, p)) {
+          blockingPriorities.push({ type: '其他文件夹映射', priority: fmPriority });
         }
       }
     });
