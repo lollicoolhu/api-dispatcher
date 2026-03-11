@@ -10,7 +10,7 @@ let baseFolder = process.argv[2] || 'public/mock';
 let accessLogs = [];
 const MAX_LOGS = 1000;
 
-const DATA_FILE = path.join(__dirname, '.mock-server-data.json');
+const DATA_FILE = path.join(__dirname, 'public/.mock-server-data.json');
 let tempOverrides = {};  // { path: { content, enabled, priority } }
 let urlMappings = {};    // { path: { target, enabled, priority } }
 let folderMappings = {}; // { pattern: { folder, enabled, priority } } 本地文件夹映射
