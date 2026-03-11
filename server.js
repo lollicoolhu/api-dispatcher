@@ -961,5 +961,16 @@ function handleRequest(req, res, urlPath, queryString, filePath, fileExists, req
 server.listen(PORT, '0.0.0.0', () => {
   console.log('Mock server running at http://0.0.0.0:' + PORT);
   console.log('Admin panel: http://localhost:' + PORT + '/admin');
-  console.log('Serving files from: ' + baseFolder);
+  
+  // 显示启用的本地文件夹
+  const enabledFolders = Object.entries(localFolders).filter(([_, config]) => config.enabled).map(([path]) => path);
+  if (enabledFolders.length > 0) {
+    console.log('Local folders (' + enabledFolders.length + '): ' + enabledFolders.join(', '));
+  }
+  
+  // 显示启用的全局服务器
+  const enabledServers = Object.entries(globalServers).filter(([_, config]) => config.enabled).map(([url]) => url);
+  if (enabledServers.length > 0) {
+    console.log('Global servers (' + enabledServers.length + '): ' + enabledServers.join(', '));
+  }
 });
