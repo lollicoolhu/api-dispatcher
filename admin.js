@@ -1221,29 +1221,49 @@ function downloadResponseContent(logIdx) {
 }
 
 // 解析 x-bbae-page header
-// 格式: Activity>Fragment#层数*可见,Fragment#层数...
+// 格式: Activity>#0*Fragment1>#1Fragment2>#2*Fragment3...
+// > 是分隔符，分割 activity 和多个 fragment
+// #数字 在 fragment 名称开头表示层级
+// * 表示当前 fragment 可见
 function parsePageInfo(pageHeader) {
   if (!pageHeader) return null;
   try {
     const parts = pageHeader.split('>');
     const activity = parts[0] || '';
     const fragments = [];
+    
+    // 从第二个元素开始都是 fragments
     if (parts.length > 1) {
-      const fragParts = parts.slice(1).join('>').split(',');
-      fragParts.forEach(frag => {
-        if (!frag.trim()) return;
+      for (let i = 1; i < parts.length; i++) {
+        const frag = parts[i].trim();
+        if (!frag) continue;
+        
+        // 先移除 * 标记
         const visible = frag.includes('*');
-        const cleanFrag = frag.replace('*', '');
-        const match = cleanFrag.match(/^(.+?)#(\d+)$/);
+        let cleanFrag = frag.replace(/\*/g, '');
+        
+        // 提取层级数字（匹配开头的 #数字）
+        const match = cleanFrag.match(/^#(\d+)\s*(.+)$/);
         if (match) {
-          fragments.push({ name: match[1], depth: parseInt(match[2]), visible });
+          fragments.push({ 
+            name: match[2].trim(), 
+            depth: parseInt(match[1]), 
+            visible 
+          });
         } else {
-          fragments.push({ name: cleanFrag, depth: 0, visible });
+          // 没有层级信息，默认为 0
+          fragments.push({ 
+            name: cleanFrag.trim(), 
+            depth: 0, 
+            visible 
+          });
         }
-      });
+      }
     }
+    
     return { activity, fragments };
   } catch (e) {
+    console.error('parsePageInfo error:', e);
     return null;
   }
 }
@@ -1252,23 +1272,47 @@ function renderPageInfo(pageHeader) {
   const info = parsePageInfo(pageHeader);
   if (!info) return '<em>无页面信息</em>';
   
+  console.log('Parsed page info:', info); // 调试信息
+  
   let html = '<div style="margin-bottom:12px"><strong>Activity</strong></div>';
-  html += '<div class="detail-content" style="padding:10px;margin-bottom:15px"><span style="color:#007bff;font-weight:bold">' + escapeHtml(info.activity) + '</span></div>';
+  html += '<div class="detail-content" style="padding:10px;margin-bottom:15px;background:#e3f2fd;border-left:3px solid #2196f3"><span style="color:#1976d2;font-weight:bold;font-size:14px">' + escapeHtml(info.activity) + '</span></div>';
   
   if (info.fragments.length > 0) {
-    html += '<div style="margin-bottom:10px"><strong>Fragments</strong></div>';
-    html += '<div class="detail-content" style="padding:10px;font-family:monospace;font-size:12px">';
-    info.fragments.forEach((f) => {
-      const tabs = '\t'.repeat(f.depth);
-      const color = f.visible ? '#28a745' : '#666';
-      const weight = f.visible ? 'bold' : 'normal';
-      html += '<pre style="margin:0;color:' + color + ';font-weight:' + weight + '">' + tabs + escapeHtml(f.name) + '</pre>';
+    html += '<div style="margin-bottom:10px"><strong>Fragments (' + info.fragments.length + ')</strong></div>';
+    html += '<div class="detail-content" style="padding:10px">';
+    
+    info.fragments.forEach((f, idx) => {
+      // 根据层级深度设置左边距
+      const marginLeft = f.depth * 24;
+      
+      console.log('Fragment:', f.name, 'depth:', f.depth, 'marginLeft:', marginLeft, 'visible:', f.visible); // 调试信息
+      
+      // 可见状态样式
+      const bgColor = f.visible ? '#e8f5e9' : '#f5f5f5';
+      const borderColor = f.visible ? '#4caf50' : '#e0e0e0';
+      const textColor = f.visible ? '#2e7d32' : '#757575';
+      const icon = f.visible ? '👁️' : '　';
+      
+      html += '<div style="margin-bottom:6px;margin-left:' + marginLeft + 'px;padding:8px 12px;background:' + bgColor + ';border-left:3px solid ' + borderColor + ';border-radius:4px;display:flex;align-items:center;gap:8px">';
+      html += '<span style="font-size:16px">' + icon + '</span>';
+      html += '<span style="color:' + textColor + ';font-weight:' + (f.visible ? 'bold' : 'normal') + ';font-family:monospace;font-size:13px">' + escapeHtml(f.name) + '</span>';
+      html += '<span style="font-size:10px;color:#999;margin-left:auto">(层级:' + f.depth + ')</span>'; // 临时显示层级用于调试
+      html += '</div>';
     });
+    
+    html += '</div>';
+    
+    // 添加图例说明
+    html += '<div style="margin-top:10px;padding:8px;background:#f9f9f9;border-radius:4px;font-size:11px;color:#666">';
+    html += '<strong>说明：</strong> ';
+    html += '<span style="margin-right:15px">👁️ = 可见</span>';
+    html += '<span style="margin-right:15px">左边距 = 层级深度</span>';
+    html += '<span>绿色背景 = 当前可见</span>';
     html += '</div>';
   }
   
   html += '<div style="margin-top:15px;margin-bottom:10px"><strong>原始数据</strong></div>';
-  html += '<div class="detail-content" style="padding:10px;font-size:11px;word-break:break-all;color:#666">' + escapeHtml(pageHeader) + '</div>';
+  html += '<div class="detail-content" style="padding:10px;font-size:11px;word-break:break-all;color:#666;font-family:monospace">' + escapeHtml(pageHeader) + '</div>';
   
   return html;
 }
@@ -1319,9 +1363,31 @@ function renderLogs() {
   
   // 计算时间差
   const formatTimeAgo = (timeStr) => {
+    // timeStr 格式: "14:30:00.123" (只有时分秒毫秒，没有日期)
+    // 由于没有日期信息，我们假设是今天的时间
     const now = new Date();
-    const time = new Date(timeStr.replace(/\//g, '-'));
+    
+    // 解析时间字符串
+    const timeParts = timeStr.split(':');
+    if (timeParts.length < 3) return '未知';
+    
+    const hours = parseInt(timeParts[0]);
+    const minutes = parseInt(timeParts[1]);
+    const secondsParts = timeParts[2].split('.');
+    const seconds = parseInt(secondsParts[0]);
+    const milliseconds = secondsParts[1] ? parseInt(secondsParts[1]) : 0;
+    
+    // 创建今天的时间对象
+    const time = new Date();
+    time.setHours(hours, minutes, seconds, milliseconds);
+    
+    // 如果时间在未来（说明是昨天的），减去一天
+    if (time > now) {
+      time.setDate(time.getDate() - 1);
+    }
+    
     const diff = Math.floor((now - time) / 1000);
+    if (diff < 0) return '刚刚';
     if (diff < 60) return diff + '秒前';
     if (diff < 3600) return Math.floor(diff / 60) + '分钟前';
     if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
@@ -1910,16 +1976,28 @@ async function saveToServer() {
 }
 
 // ========== 日志批量保存 ==========
+let logBatchDetailTab = 'response';
+let logBatchActiveLog = null;
+
 function openLogBatchSave() {
   // 填充文件夹下拉框
   const folderSelect = document.getElementById('logBatchFolder');
-  const currentFolder = document.getElementById('folderSelect').value;
-  folderSelect.innerHTML = publicFolders.map(f => 
-    '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
-  ).join('');
+  const serverFolderSelect = document.getElementById('serverFolderSelect');
+  const currentFolder = serverFolderSelect ? serverFolderSelect.value : 'public/mock';
+  
+  // 移除 public/ 前缀显示
+  const currentFolderName = currentFolder.replace(/^public\//, '');
+  
+  folderSelect.innerHTML = publicFolders.map(f => {
+    const folderName = f.path.replace(/^public\//, '');
+    return '<option value="' + folderName + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + folderName + '</option>';
+  }).join('');
+  
+  // 添加"新建文件夹"选项
+  folderSelect.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
   
   if (publicFolders.length === 0) {
-    folderSelect.innerHTML = '<option value="mock">mock</option>';
+    folderSelect.innerHTML = '<option value="mock">mock</option><option value="__new__">+ 新建文件夹...</option>';
   }
   
   // 按路径分组日志
@@ -1947,12 +2025,85 @@ function openLogBatchSave() {
   
   document.getElementById('logBatchGroupCount').textContent = Object.keys(logBatchGroups).length;
   document.getElementById('logBatchSelectedCount').textContent = logBatchSelectedIds.size;
+  logBatchActiveLog = null;
+  document.getElementById('logBatchDetail').style.display = 'none';
   renderLogBatchList();
   document.getElementById('logBatchSaveModal').classList.add('active');
 }
 
 function closeLogBatchSave() {
   document.getElementById('logBatchSaveModal').classList.remove('active');
+  logBatchActiveLog = null;
+}
+
+function handleLogBatchFolderChange() {
+  const select = document.getElementById('logBatchFolder');
+  if (select.value === '__new__') {
+    // 打开新建文件夹模态框
+    document.getElementById('newFolderName').value = '';
+    document.getElementById('newFolderModal').classList.add('active');
+  }
+}
+
+function closeNewFolderModal() {
+  document.getElementById('newFolderModal').classList.remove('active');
+  // 恢复下拉框选择
+  const select = document.getElementById('logBatchFolder');
+  if (select.value === '__new__') {
+    select.selectedIndex = 0;
+  }
+}
+
+async function createNewFolder() {
+  const folderName = document.getElementById('newFolderName').value.trim();
+  if (!folderName) {
+    alert('请输入文件夹名称');
+    return;
+  }
+  
+  // 验证文件夹名称（只允许字母、数字、下划线、中划线）
+  if (!/^[a-zA-Z0-9_-]+$/.test(folderName)) {
+    alert('文件夹名称只能包含字母、数字、下划线和中划线');
+    return;
+  }
+  
+  const folderPath = 'public/' + folderName;
+  
+  // 检查是否已存在
+  if (publicFolders.some(f => f.path === folderPath)) {
+    alert('文件夹已存在');
+    return;
+  }
+  
+  // 创建一个临时文件来创建文件夹
+  const tempFile = folderPath + '/.gitkeep';
+  try {
+    const res = await fetch('/admin/har/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [tempFile]: '' })
+    });
+    const result = await res.json();
+    if (result.success) {
+      // 刷新文件夹列表
+      await loadPublicFolders();
+      
+      // 更新下拉框
+      const select = document.getElementById('logBatchFolder');
+      select.innerHTML = publicFolders.map(f => {
+        const name = f.path.replace(/^public\//, '');
+        return '<option value="' + name + '"' + (f.path === folderPath ? ' selected' : '') + '>' + name + '</option>';
+      }).join('');
+      select.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
+      select.value = folderName;
+      
+      closeNewFolderModal();
+    } else {
+      alert('创建失败: ' + result.error);
+    }
+  } catch (e) {
+    alert('创建失败: ' + e.message);
+  }
 }
 
 function renderLogBatchList() {
@@ -1963,12 +2114,17 @@ function renderLogBatchList() {
   let html = '';
   for (const [path, items] of Object.entries(logBatchGroups)) {
     const expanded = logBatchExpandedGroups.has(path);
-    const allSelected = items.every(l => logBatchSelectedIds.has(l.idx));
-    const someSelected = items.some(l => logBatchSelectedIds.has(l.idx));
+    const selectedCount = items.filter(l => logBatchSelectedIds.has(l.idx)).length;
+    const allSelected = selectedCount === items.length;
+    const someSelected = selectedCount > 0 && selectedCount < items.length;
+    const noneSelected = selectedCount === 0;
     const latest = items[0];
     
+    // 复选框状态：全选=checked, 半选=indeterminate, 未选=unchecked
+    const checkboxId = 'group-checkbox-' + path.replace(/[^a-zA-Z0-9]/g, '_');
+    
     html += '<div class="group"><div class="group-header" onclick="toggleLogBatchGroup(\'' + path.replace(/'/g, "\\'") + '\')">' +
-      '<input type="checkbox" ' + (allSelected ? 'checked' : '') + (someSelected && !allSelected ? ' style="opacity:0.5"' : '') + ' onclick="event.stopPropagation();toggleLogBatchGroupSelect(\'' + path.replace(/'/g, "\\'") + '\', this.checked)">' +
+      '<input type="checkbox" id="' + checkboxId + '" ' + (allSelected ? 'checked' : '') + ' onclick="event.stopPropagation();toggleLogBatchGroupSelect(\'' + path.replace(/'/g, "\\'") + '\', this.checked)">' +
       '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
       '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
       '<span class="path">' + path + '</span>' +
@@ -1976,7 +2132,8 @@ function renderLogBatchList() {
     
     html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
     items.forEach((l, idx) => {
-      html += '<div class="item-row ' + (logBatchSelectedIds.has(l.idx) ? 'active' : '') + '" onclick="toggleLogBatchSelect(' + l.idx + ')">' +
+      const isActive = logBatchActiveLog && logBatchActiveLog.idx === l.idx;
+      html += '<div class="item-row ' + (logBatchSelectedIds.has(l.idx) ? 'active' : '') + (isActive ? ' selected' : '') + '" onclick="showLogBatchDetail(' + l.idx + ')">' +
         '<input type="checkbox" ' + (logBatchSelectedIds.has(l.idx) ? 'checked' : '') + ' onclick="event.stopPropagation();toggleLogBatchSelect(' + l.idx + ')">' +
         '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
         '<span style="color:#666">#' + (idx + 1) + ' · ' + l.time + '</span></div>';
@@ -1986,6 +2143,101 @@ function renderLogBatchList() {
   
   container.innerHTML = html;
   document.getElementById('logBatchSelectedCount').textContent = logBatchSelectedIds.size;
+  
+  // 设置半选状态
+  for (const [path, items] of Object.entries(logBatchGroups)) {
+    const selectedCount = items.filter(l => logBatchSelectedIds.has(l.idx)).length;
+    const someSelected = selectedCount > 0 && selectedCount < items.length;
+    const checkboxId = 'group-checkbox-' + path.replace(/[^a-zA-Z0-9]/g, '_');
+    const checkbox = document.getElementById(checkboxId);
+    if (checkbox && someSelected) {
+      checkbox.indeterminate = true;
+    }
+  }
+}
+
+function showLogBatchDetail(idx) {
+  const log = logs[idx];
+  if (!log) return;
+  
+  logBatchActiveLog = log;
+  logBatchActiveLog.idx = idx;
+  
+  document.getElementById('logBatchDetail').style.display = 'block';
+  renderLogBatchDetail();
+  renderLogBatchList(); // 重新渲染以更新选中状态
+}
+
+function renderLogBatchDetail() {
+  if (!logBatchActiveLog) return;
+  
+  const log = logBatchActiveLog;
+  const content = document.getElementById('logBatchDetailContent');
+  
+  const headerTable = (headers) => {
+    if (!headers || Object.keys(headers).length === 0) return '<em>无</em>';
+    return '<table style="width:100%;font-size:12px"><tbody>' + 
+      Object.entries(headers).map(([k, v]) => 
+        '<tr><td style="padding:4px;border-bottom:1px solid #eee;font-weight:bold;width:200px">' + escapeHtml(k) + '</td><td style="padding:4px;border-bottom:1px solid #eee;word-break:break-all">' + escapeHtml(String(v)) + '</td></tr>'
+      ).join('') + '</tbody></table>';
+  };
+  
+  if (logBatchDetailTab === 'response') {
+    // Response Body
+    let body = '';
+    if (log.found === 'mapping' && log.mappingResponse) {
+      body = log.mappingResponse.body || '';
+      if (log.mappingResponse.isBase64) {
+        body = '[Base64 数据，大小: ' + formatSize(body.length) + ']';
+      } else {
+        try {
+          body = JSON.stringify(JSON.parse(body), null, 2);
+        } catch {}
+      }
+    } else {
+      body = '本地文件或404';
+    }
+    
+    // Response Headers
+    const headers = (log.found === 'mapping' && log.mappingResponse) ? log.mappingResponse.headers : {};
+    
+    content.innerHTML = 
+      '<div style="margin-bottom:15px"><strong style="font-size:14px">Response Body</strong></div>' +
+      '<pre style="margin:0 0 20px 0;padding:10px;background:#f5f5f5;border-radius:4px;max-height:300px;overflow:auto;font-size:12px">' + escapeHtml(body) + '</pre>' +
+      '<div style="margin-bottom:10px"><strong style="font-size:14px">Response Headers (' + Object.keys(headers).length + ')</strong></div>' +
+      '<div style="padding:10px;background:#f5f5f5;border-radius:4px;max-height:200px;overflow:auto">' + headerTable(headers) + '</div>';
+      
+  } else if (logBatchDetailTab === 'request') {
+    const method = log.method || 'GET';
+    const query = log.query || {};
+    const body = log.body || '';
+    const headers = log.headers || {};
+    
+    let bodyDisplay = body;
+    if (body) {
+      try {
+        bodyDisplay = JSON.stringify(JSON.parse(body), null, 2);
+      } catch {}
+    }
+    
+    content.innerHTML = 
+      '<div style="margin-bottom:15px"><strong style="font-size:14px">Request Info</strong></div>' +
+      '<div style="padding:10px;background:#f5f5f5;border-radius:4px;margin-bottom:20px">' +
+      '<div style="margin-bottom:8px"><strong>Method:</strong> <span style="padding:2px 8px;background:#007bff;color:#fff;border-radius:3px;font-size:11px">' + method + '</span></div>' +
+      '<div style="margin-bottom:8px"><strong>Path:</strong> <code style="background:#fff;padding:2px 6px;border-radius:3px">' + escapeHtml(log.path) + '</code></div>' +
+      '<div style="margin-bottom:8px"><strong>Query:</strong><pre style="margin:5px 0 0 0;padding:8px;background:#fff;border:1px solid #ddd;border-radius:3px;font-size:11px">' + escapeHtml(JSON.stringify(query, null, 2)) + '</pre></div>' +
+      (body ? '<div><strong>Body:</strong><pre style="margin:5px 0 0 0;padding:8px;background:#fff;border:1px solid #ddd;border-radius:3px;font-size:11px;max-height:150px;overflow:auto">' + escapeHtml(bodyDisplay) + '</pre></div>' : '') +
+      '</div>' +
+      '<div style="margin-bottom:10px"><strong style="font-size:14px">Request Headers (' + Object.keys(headers).length + ')</strong></div>' +
+      '<div style="padding:10px;background:#f5f5f5;border-radius:4px;max-height:200px;overflow:auto">' + headerTable(headers) + '</div>';
+  }
+}
+
+function switchLogBatchDetailTab(tab) {
+  logBatchDetailTab = tab;
+  document.querySelectorAll('#logBatchDetail .detail-tab').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  renderLogBatchDetail();
 }
 
 function toggleLogBatchGroup(path) {
@@ -2033,13 +2285,19 @@ function collapseAllLogBatch() {
 }
 
 async function saveLogBatchToServer() {
-  const folder = document.getElementById('logBatchFolder').value || 'public/mock';
-  const pretty = document.getElementById('logBatchPretty').checked;
+  const folderInput = document.getElementById('logBatchFolder').value.trim();
+  if (!folderInput || folderInput === '__new__') {
+    alert('请选择文件夹');
+    return;
+  }
   
   if (logBatchSelectedIds.size === 0) {
     alert('请先选择要保存的日志');
     return;
   }
+  
+  // 确保文件夹路径以 public/ 开头
+  const folder = folderInput.startsWith('public/') ? folderInput : 'public/' + folderInput;
   
   const data = {};
   logBatchSelectedIds.forEach(idx => {
@@ -2055,6 +2313,7 @@ async function saveLogBatchToServer() {
     }
     
     // 格式化
+    const pretty = document.getElementById('logBatchPretty').checked;
     if (pretty) {
       try {
         content = JSON.stringify(JSON.parse(content), null, 2);
@@ -2070,6 +2329,8 @@ async function saveLogBatchToServer() {
   if (result.success) {
     alert('保存成功: ' + result.count + ' 个文件');
     closeLogBatchSave();
+    // 刷新文件夹列表
+    loadPublicFolders();
   } else {
     alert('保存失败: ' + result.error);
   }

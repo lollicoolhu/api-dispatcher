@@ -312,29 +312,60 @@
 
   <!-- Log Batch Save Modal -->
   <div class="modal" id="logBatchSaveModal">
-    <div class="modal-content" style="max-width:1200px">
+    <div class="modal-content" style="max-width:1400px">
       <div class="modal-header">
         <h3>批量保存日志接口</h3>
         <button class="btn btn-sm btn-secondary" onclick="closeLogBatchSave()">&times;</button>
       </div>
-      <div class="modal-body">
-        <div class="filters" style="margin-bottom:10px">
-          <label>输出文件夹: <select id="logBatchFolder" style="width:150px;padding:4px 8px"></select></label>
-          <label><input type="checkbox" id="logBatchPretty" checked> 格式化JSON</label>
-          <button class="btn btn-sm btn-primary" onclick="selectAllLogBatch()">全选</button>
-          <button class="btn btn-sm btn-secondary" onclick="selectNoneLogBatch()">取消</button>
-          <button class="btn btn-sm btn-secondary" onclick="expandAllLogBatch()">展开</button>
-          <button class="btn btn-sm btn-secondary" onclick="collapseAllLogBatch()">收起</button>
+      <div class="modal-body" style="display:flex;gap:15px">
+        <div style="flex:1;min-width:0">
+          <div class="filters" style="margin-bottom:10px">
+            <label>输出文件夹: <select id="logBatchFolder" style="width:200px;padding:4px 8px" onchange="handleLogBatchFolderChange()"></select></label>
+            <label><input type="checkbox" id="logBatchPretty" checked> 格式化JSON</label>
+            <button class="btn btn-sm btn-primary" onclick="selectAllLogBatch()">全选</button>
+            <button class="btn btn-sm btn-secondary" onclick="selectNoneLogBatch()">取消</button>
+            <button class="btn btn-sm btn-secondary" onclick="expandAllLogBatch()">展开</button>
+            <button class="btn btn-sm btn-secondary" onclick="collapseAllLogBatch()">收起</button>
+          </div>
+          <div class="stats" style="margin-bottom:10px">
+            <span>分组数: <strong id="logBatchGroupCount">0</strong></span>
+            <span>已选: <strong id="logBatchSelectedCount">0</strong></span>
+          </div>
+          <div class="list-container" id="logBatchList" style="max-height:500px;border:1px solid #ddd;border-radius:4px"></div>
         </div>
-        <div class="stats" style="margin-bottom:10px">
-          <span>分组数: <strong id="logBatchGroupCount">0</strong></span>
-          <span>已选: <strong id="logBatchSelectedCount">0</strong></span>
+        <div id="logBatchDetail" style="flex:1;min-width:0;border-left:1px solid #ddd;padding-left:15px;display:none">
+          <div style="margin-bottom:10px;font-weight:bold">接口详情</div>
+          <div class="detail-tabs" style="margin-bottom:10px">
+            <button class="detail-tab active" onclick="switchLogBatchDetailTab('response')">Response</button>
+            <button class="detail-tab" onclick="switchLogBatchDetailTab('request')">Request</button>
+          </div>
+          <div id="logBatchDetailContent" style="max-height:450px;overflow:auto"></div>
         </div>
-        <div class="list-container" id="logBatchList" style="max-height:400px;border:1px solid #ddd;border-radius:4px"></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeLogBatchSave()">取消</button>
         <button class="btn btn-success" onclick="saveLogBatchToServer()">保存到服务器</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Folder Modal -->
+  <div class="modal" id="newFolderModal">
+    <div class="modal-content" style="max-width:400px">
+      <div class="modal-header">
+        <h3>新建文件夹</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeNewFolderModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px">
+          <label style="display:block;margin-bottom:5px">文件夹名称:</label>
+          <input type="text" id="newFolderName" placeholder="例如: qa-test" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px">
+          <div style="margin-top:5px;font-size:12px;color:#666">将创建在 public/ 目录下</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeNewFolderModal()">取消</button>
+        <button class="btn btn-primary" onclick="createNewFolder()">创建</button>
       </div>
     </div>
   </div>
