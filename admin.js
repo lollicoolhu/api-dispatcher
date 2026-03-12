@@ -6,6 +6,19 @@ let modalCallback = null, mappingTestTab = 'response';
 let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
 let publicFolders = [];
 
+// 辅助函数：获取路径的启用版本
+function getEnabledOverride(path) {
+  const versions = overrides[path];
+  if (!versions || !Array.isArray(versions)) return null;
+  return versions.find(v => v.enabled) || null;
+}
+
+// 辅助函数：检查路径是否有临时修改
+function hasOverride(path) {
+  const versions = overrides[path];
+  return versions && Array.isArray(versions) && versions.length > 0;
+}
+
 // 初始化
 fetch('/admin/server-info').then(r => r.json()).then(d => {
   document.getElementById('serverAddrs').innerHTML = d.addresses.map(a => 
@@ -358,8 +371,9 @@ function renderMappings() {
     });
     
     // 3. 同路径的临时修改（优先级更高的）
-    if (overrides[p] && overrides[p].enabled) {
-      const overridePriority = overrides[p].priority ?? 1;
+    const enabledOverride = getEnabledOverride(p);
+    if (enabledOverride) {
+      const overridePriority = enabledOverride.priority ?? 1;
       if (overridePriority > priority) {
         blockingPriorities.push({ type: '临时修改', priority: overridePriority });
       }
@@ -749,36 +763,64 @@ function confirmResolve(result) {
 let currentModalPath = '';
 
 function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '') {
-  document.getElementById('modalTitle').textContent = title;
-  document.getElementById('modalPath').textContent = path;
-  document.getElementById('jsonEditor').value = content;
-  document.getElementById('jsonError').textContent = '';
+  const titleEl = document.getElementById('modalTitle');
+  const pathEl = document.getElementById('modalPath');
+  const editorEl = document.getElementById('jsonEditor');
+  const errorEl = document.getElementById('jsonError');
+  if (titleEl) titleEl.textContent = title;
+  if (pathEl) pathEl.textContent = path;
+  if (editorEl) editorEl.value = content;
+  if (errorEl) errorEl.textContent = '';
   currentModalPath = path;
   modalCallback = onSave;
   
   // 显示/隐藏永久保存和删除按钮
-  document.getElementById('modalPermanentBtn').style.display = showFileActions ? 'inline-block' : 'none';
-  document.getElementById('modalDeleteBtn').style.display = showFileActions ? 'inline-block' : 'none';
+  const permanentBtn = document.getElementById('modalPermanentBtn');
+  const deleteBtn = document.getElementById('modalDeleteBtn');
+  if (permanentBtn) permanentBtn.style.display = showFileActions ? 'inline-block' : 'none';
+  if (deleteBtn) deleteBtn.style.display = showFileActions ? 'inline-block' : 'none';
   
   // 显示/隐藏优先级输入
   const priorityDiv = document.getElementById('modalPriorityDiv');
-  if (showPriority) {
-    priorityDiv.style.display = 'flex';
-    document.getElementById('modalPriority').value = currentPriority;
-  } else {
-    priorityDiv.style.display = 'none';
+  const priorityInput = document.getElementById('modalPriority');
+  if (priorityDiv) {
+    if (showPriority) {
+      priorityDiv.style.display = 'flex';
+      if (priorityInput) priorityInput.value = currentPriority;
+    } else {
+      priorityDiv.style.display = 'none';
+    }
   }
   
   // 显示/隐藏备注输入
   const remarkDiv = document.getElementById('modalRemarkDiv');
-  if (showPriority) {
-    remarkDiv.style.display = 'block';
-    document.getElementById('modalRemark').value = currentRemark || '';
-  } else {
-    remarkDiv.style.display = 'none';
+  const remarkInput = document.getElementById('modalRemark');
+  if (remarkDiv) {
+    if (showPriority) {
+      remarkDiv.style.display = 'block';
+      if (remarkInput) remarkInput.value = currentRemark || '';
+    } else {
+      remarkDiv.style.display = 'none';
+    }
   }
   
-  document.getElementById('jsonModal').classList.add('active');
+  const modal = document.getElementById('jsonModal');
+  if (modal) {
+    modal.classList.add('active');
+    const footer = modal.querySelector('.modal-footer');
+    if (footer) {
+      footer.innerHTML =
+        '<button class="btn btn-danger" id="modalDeleteBtn" style="display:none" onclick="deleteFileFromModal()">删除文件</button>' +
+        '<button class="btn btn-success" id="modalPermanentBtn" style="display:none" onclick="savePermanentFromModal()">永久保存</button>' +
+        '<button class="btn btn-secondary" onclick="formatJson()">格式化</button>' +
+        '<button class="btn btn-secondary" onclick="closeModal()">取消</button>' +
+        '<button class="btn btn-primary" id="modalSaveBtn">临时保存</button>';
+      const saveBtn = document.getElementById('modalSaveBtn');
+      if (saveBtn) {
+        saveBtn.onclick = handleModalSaveClick;
+      }
+    }
+  }
 }
 
 function closeModal() {
@@ -810,7 +852,7 @@ function isJsonPath(path) {
   return !nonJsonExts.includes(ext);
 }
 
-document.getElementById('modalSaveBtn').onclick = async function() {
+async function handleModalSaveClick() {
   const content = document.getElementById('jsonEditor').value;
   // 只对 JSON 路径校验格式
   if (isJsonPath(currentModalPath)) {
@@ -823,7 +865,12 @@ document.getElementById('modalSaveBtn').onclick = async function() {
   }
   if (modalCallback) await modalCallback(content);
   closeModal();
-};
+}
+
+const initialModalSaveBtn = document.getElementById('modalSaveBtn');
+if (initialModalSaveBtn) {
+  initialModalSaveBtn.onclick = handleModalSaveClick;
+}
 
 async function savePermanentFromModal() {
   const content = document.getElementById('jsonEditor').value;
@@ -875,47 +922,49 @@ async function loadOverrides(autoRender = true) {
 function renderOverrides() {
   const list = document.getElementById('overrideList');
   const paths = Object.keys(overrides);
-  document.getElementById('overrideCount').textContent = '(' + paths.length + ')';
+  
+  // 计算总版本数
+  let totalVersions = 0;
+  paths.forEach(p => {
+    if (Array.isArray(overrides[p])) {
+      totalVersions += overrides[p].length;
+    }
+  });
+  
+  document.getElementById('overrideCount').textContent = '(' + paths.length + ' 接口, ' + totalVersions + ' 版本)';
   if (paths.length === 0) { list.innerHTML = '<em>无临时修改</em>'; return; }
   
   list.innerHTML = paths.map(p => {
-    const o = overrides[p];
-    const disabled = !o.enabled;
-    const priority = o.priority ?? 1;
+    const versions = overrides[p] || [];
+    if (!Array.isArray(versions) || versions.length === 0) return '';
+    
+    const enabledVersion = versions.find(v => v.enabled);
+    const priority = enabledVersion ? (enabledVersion.priority ?? 1) : 1;
+    
     // 检查 JSON 是否有效（仅对 JSON 路径）
     let jsonInvalid = false;
-    if (o.enabled && isJsonPath(p)) {
-      try { JSON.parse(o.content || ''); } catch { jsonInvalid = true; }
+    if (enabledVersion && isJsonPath(p)) {
+      try { JSON.parse(enabledVersion.content || ''); } catch { jsonInvalid = true; }
     }
     
     // 收集所有可能阻挡当前路径的优先级来源
     const blockingPriorities = [];
     
-    // 1. 本地文件夹优先级（取所有启用的本地文件夹中的最高优先级）
+    // 1. 本地文件夹优先级
     Object.values(localFolders).forEach(lf => {
       if (lf.enabled) {
         blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
       }
     });
     
-    // 2. 全局服务器（取所有启用的全局服务器中的最高优先级）
+    // 2. 全局服务器
     Object.values(globalServers).forEach(gs => {
       if (gs.enabled) {
         blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
       }
     });
     
-    // 3. 同路径的其他临时修改（优先级更高的）
-    Object.keys(overrides).forEach(otherPath => {
-      if (otherPath !== p && overrides[otherPath].enabled && otherPath === p) {
-        const otherPriority = overrides[otherPath].priority ?? 1;
-        if (otherPriority > priority) {
-          blockingPriorities.push({ type: '其他临时修改', priority: otherPriority });
-        }
-      }
-    });
-    
-    // 4. 同路径的URL映射（优先级更高的）
+    // 3. 同路径的URL映射
     if (mappings[p] && mappings[p].enabled) {
       const mappingPriority = mappings[p].priority ?? 1;
       if (mappingPriority > priority) {
@@ -923,7 +972,7 @@ function renderOverrides() {
       }
     }
     
-    // 5. 匹配的文件夹映射（优先级更高的）
+    // 4. 匹配的文件夹映射
     Object.keys(folderMappings).forEach(pattern => {
       const fm = folderMappings[pattern];
       if (fm.enabled) {
@@ -944,7 +993,7 @@ function renderOverrides() {
     
     // 检查是否被更高优先级阻挡
     let blockedBy = null;
-    if (o.enabled && !jsonInvalid) {
+    if (enabledVersion && !jsonInvalid) {
       for (const bp of blockingPriorities) {
         if (priority < bp.priority) {
           if (!blockedBy || bp.priority > blockedBy.priority) {
@@ -955,7 +1004,8 @@ function renderOverrides() {
     }
     
     const unreachable = jsonInvalid || blockedBy;
-    const remarkHtml = o.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(o.remark) + '">' + escapeHtml(o.remark) + '</span>' : '';
+    const remarkHtml = enabledVersion && enabledVersion.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(enabledVersion.remark) + '">' + escapeHtml(enabledVersion.remark) + '</span>' : '';
+    
     // 简洁的不可达原因
     let unreachableLabel = '';
     if (jsonInvalid) {
@@ -963,70 +1013,380 @@ function renderOverrides() {
     } else if (blockedBy) {
       unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
     }
-    return '<div class="override-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-    '<input type="checkbox" ' + (o.enabled ? 'checked' : '') + ' onchange="toggleOverrideEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + p + (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+    
+    const versionInfo = versions.length > 1 ? ' <span style="color:#666;font-size:10px">(' + versions.length + '个版本)</span>' : '';
+    
+    return '<div class="override-item' + (!enabledVersion ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+    '<input type="checkbox" ' + (enabledVersion ? 'checked' : '') + ' onchange="toggleOverridePathEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+    '<span class="path">' + p + versionInfo + (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
     remarkHtml +
     '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
     '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+    '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除全部</button></div>';
   }).join('');
 }
 
-async function toggleOverrideEnabled(path, enabled) {
-  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, enabled }) });
-  overrides[path].enabled = enabled;
-  renderOverrides();
+async function toggleOverridePathEnabled(path, enabled) {
+  const versions = overrides[path] || [];
+  if (!Array.isArray(versions) || versions.length === 0) return;
+  
+  if (enabled) {
+    // 启用第一个版本（或之前启用的版本）
+    const lastEnabled = versions.find(v => v.enabled);
+    const versionId = lastEnabled ? lastEnabled.id : versions[0].id;
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, enabled: true }) });
+  } else {
+    // 禁用所有版本
+    for (const v of versions) {
+      if (v.enabled) {
+        await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId: v.id, enabled: false }) });
+      }
+    }
+  }
+  
+  await loadOverrides();
 }
 
-async function updateOverridePriority(path, priority) {
+async function updateOverridePriority(path, versionId, priority) {
   const p = parseInt(priority) || 1;
-  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, priority: p }) });
-  overrides[path].priority = p;
+  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, priority: p }) });
   // 刷新所有列表，因为优先级变化会影响其他项的可达性
+  await loadOverrides();
   renderOverrides();
   renderMappings();
   renderFolderMappings();
 }
 
 async function removeOverride(path) {
+  const confirmed = await showConfirm('确定删除该接口的所有临时修改版本？', '删除确认', '删除');
+  if (!confirmed) return;
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
   loadOverrides();
 }
 
-async function editOverride(path) {
-  const o = overrides[path] || {};
-  let content = o.content || '';
-  const currentPriority = o.priority ?? 1;
-  const currentRemark = o.remark || '';
-  try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
-  openModal('编辑临时返回值', path, content, async (newContent) => {
-    const priority = parseInt(document.getElementById('modalPriority').value) || 1;
-    const remark = document.getElementById('modalRemark').value.trim();
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, priority, remark }) });
-    overrides[path] = { content: newContent, enabled: o.enabled !== false, priority, remark };
-    // 刷新所有列表，因为优先级变化会影响其他项的可达性
-    renderOverrides();
-    renderMappings();
-    renderFolderMappings();
-  }, false, true, currentPriority, currentRemark);
+async function removeOverrideVersion(path, versionId) {
+  await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
+  loadOverrides();
 }
 
-async function setTempOverride(path, originalContent, showFileActions = false) {
-  const o = overrides[path] || {};
-  let content = o.content || originalContent;
-  const currentPriority = o.priority ?? 1;
-  const currentRemark = o.remark || '';
+async function editOverride(path) {
+  const versions = overrides[path] || [];
+  if (!Array.isArray(versions)) {
+    versions = [];
+  }
+  
+  // 打开版本管理弹窗
+  openOverrideVersionModal(path, versions);
+}
+
+// 打开版本管理窗口（可折叠版本列表）
+function openOverrideVersionModal(path, versions) {
+  const modal = document.getElementById('jsonModal');
+  const title = document.getElementById('modalTitle');
+  const pathDiv = document.getElementById('modalPath');
+  const editor = document.getElementById('jsonEditor');
+  const footer = modal ? modal.querySelector('.modal-footer') : null;
+  
+  title.textContent = '管理临时修改版本';
+  pathDiv.textContent = path;
+  
+  // 隐藏编辑器和其他控件（容错：元素可能暂时不存在）
+  if (editor) {
+    editor.style.display = 'none';
+  }
+  const jsonErrorEl = document.getElementById('jsonError');
+  if (jsonErrorEl) jsonErrorEl.textContent = '';
+  const priorityDiv = document.getElementById('modalPriorityDiv');
+  if (priorityDiv) priorityDiv.style.display = 'none';
+  const remarkDiv = document.getElementById('modalRemarkDiv');
+  if (remarkDiv) remarkDiv.style.display = 'none';
+  const permanentBtn = document.getElementById('modalPermanentBtn');
+  if (permanentBtn) permanentBtn.style.display = 'none';
+  const deleteBtn = document.getElementById('modalDeleteBtn');
+  if (deleteBtn) deleteBtn.style.display = 'none';
+  const saveBtn = document.getElementById('modalSaveBtn');
+  if (saveBtn) saveBtn.style.display = 'none';
+  
+  // 创建版本列表HTML
+  let versionListHtml = '<div class="version-panel">';
+  versionListHtml += '<div class="version-panel-header">';
+  versionListHtml += '<div class="version-panel-title">临时修改版本列表</div>';
+  versionListHtml += '<div class="version-panel-sub">共 ' + versions.length + ' 个版本，点击版本可展开/折叠</div>';
+  versionListHtml += '</div>';
+  versionListHtml += '<div style="margin-bottom:10px">';
+  versionListHtml += '<button class="btn btn-success" onclick="createNewOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\')">+ 新建版本</button>';
+  versionListHtml += '</div>';
+  
+  versionListHtml += '<div id="versionAccordion" style="max-height:calc(100vh - 350px);min-height:260px;overflow-y:auto">';
+  
+  versions.forEach((v, idx) => {
+    const isEnabled = v.enabled;
+    const createdAt = new Date(v.createdAt).toLocaleString('zh-CN');
+    const remarkText = v.remark ? escapeHtml(v.remark) : '';
+    const versionKey = 'version_' + v.id;
+    const defaultExpanded = false; // 不再默认展开已启用的版本，全部折叠
+    
+    // 版本头部（可点击折叠/展开）
+    versionListHtml += '<div style="border:1px solid ' + (isEnabled ? '#28a745' : '#ddd') + ';border-radius:4px;margin-bottom:10px;background:' + (isEnabled ? '#f0fff4' : '#fff') + '">';
+    versionListHtml += '<div style="padding:12px;cursor:pointer;display:flex;align-items:center;justify-content:space-between" onclick="toggleVersionAccordion(\'' + versionKey + '\')">';
+    versionListHtml += '<div style="flex:1;min-width:0">';
+    versionListHtml += '<span id="' + versionKey + '_arrow" style="display:inline-block;width:20px;transition:transform 0.2s;transform:rotate(' + (defaultExpanded ? '90deg' : '0deg') + ')">▶</span>';
+    versionListHtml += '<strong>版本 ' + (idx + 1) + '</strong> ';
+    if (isEnabled) {
+      versionListHtml += '<span style="color:#28a745;font-size:12px">● 已启用</span>';
+    } else {
+      versionListHtml += '<span style="color:#999;font-size:12px">○ 未启用</span>';
+    }
+    versionListHtml += '<span style="margin-left:10px;font-size:11px;color:#666">' + createdAt + '</span>';
+    if (remarkText) {
+      versionListHtml += '<span class="version-remark-pill" style="margin-left:8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + remarkText + '">备注: ' + remarkText + '</span>';
+    }
+    versionListHtml += '</div>';
+    versionListHtml += '<div style="display:flex;gap:5px" onclick="event.stopPropagation()">';
+    versionListHtml += '<input type="radio" name="selectedVersion" value="' + v.id + '" ' + (isEnabled ? 'checked' : '') + ' onchange="selectOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')" title="选择此版本">';
+    versionListHtml += '<button class="btn btn-sm btn-info" onclick="editOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">编辑</button>';
+    versionListHtml += '<button class="btn btn-sm btn-danger" onclick="deleteOverrideVersionInModal(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除</button>';
+    versionListHtml += '</div></div>';
+    
+    // 版本详情（默认展开已启用的版本）
+    versionListHtml += '<div id="' + versionKey + '_content" style="display:' + (defaultExpanded ? 'block' : 'none') + ';padding:12px;border-top:1px solid #eee;background:#fafafa">';
+    versionListHtml += '<div style="margin-bottom:8px"><strong>优先级:</strong> ' + (v.priority ?? 1) + '</div>';
+    versionListHtml += '<div style="margin-bottom:8px"><strong>备注:</strong> ' + remarkText + '</div>';
+    versionListHtml += '<div style="margin-bottom:8px"><strong>内容预览:</strong></div>';
+    
+    // 内容预览（最多显示10行）
+    let contentPreview = v.content || '{}';
+    try {
+      const parsed = JSON.parse(contentPreview);
+      contentPreview = JSON.stringify(parsed, null, 2);
+    } catch {}
+    const lines = contentPreview.split('\n');
+    const preview = lines.slice(0, 10).join('\n');
+    const hasMore = lines.length > 10;
+    
+    versionListHtml += '<pre style="max-height:200px;overflow:auto;background:#fff;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:11px">' + escapeHtml(preview);
+    if (hasMore) {
+      versionListHtml += '\n... (还有 ' + (lines.length - 10) + ' 行)';
+    }
+    versionListHtml += '</pre>';
+    versionListHtml += '</div>';
+    
+    versionListHtml += '</div>';
+  });
+  
+  versionListHtml += '</div>';
+  
+  // 插入版本列表（容错：editor 可能为空）
+  const editorParent = editor ? editor.parentElement : document.getElementById('modalBody') || modal;
+  if (editorParent) {
+    const old = document.getElementById('versionListContainer');
+    if (old) old.remove();
+    editorParent.insertAdjacentHTML('afterbegin', '<div id="versionListContainer">' + versionListHtml + '</div>');
+  }
+  
+  // 修改底部按钮
+  if (footer) {
+    footer.innerHTML = '<button class="btn btn-secondary" onclick="closeOverrideVersionModal()">关闭</button>';
+  }
+  
+  modal.classList.add('active');
+}
+
+// 切换版本折叠/展开
+function toggleVersionAccordion(versionKey) {
+  const content = document.getElementById(versionKey + '_content');
+  const arrow = document.getElementById(versionKey + '_arrow');
+  if (content.style.display === 'none') {
+    content.style.display = 'block';
+    arrow.style.transform = 'rotate(90deg)';
+  } else {
+    content.style.display = 'none';
+    arrow.style.transform = 'rotate(0deg)';
+  }
+}
+
+// 选择版本（单选）
+async function selectOverrideVersion(path, versionId) {
+  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, enabled: true }) });
+  await loadOverrides();
+  closeOverrideVersionModal();
+}
+
+// 在弹窗中删除版本
+async function deleteOverrideVersionInModal(path, versionId) {
+  const confirmed = await showConfirm('确定删除该版本？', '删除确认', '删除');
+  if (!confirmed) return;
+  
+  await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
+  await loadOverrides();
+  
+  // 如果还有版本，直接在当前弹窗内刷新列表（不关闭弹窗）
+  const versions = overrides[path] || [];
+  if (versions.length > 0) {
+    const container = document.getElementById('versionListContainer');
+    if (container) container.remove();
+    openOverrideVersionModal(path, versions);
+  } else {
+    closeOverrideVersionModal();
+  }
+}
+
+function resetOverrideVersionModalView() {
+  const container = document.getElementById('versionListContainer');
+  if (container) container.remove();
+  
+  const editor = document.getElementById('jsonEditor');
+  if (editor) {
+    editor.style.display = 'block';
+  }
+  const editorBanner = document.getElementById('versionEditorBanner');
+  if (editorBanner) editorBanner.remove();
+  const modal = document.getElementById('jsonModal');
+  if (modal) {
+    modal.classList.remove('version-layout');
+  }
+}
+
+function closeOverrideVersionModal() {
+  resetOverrideVersionModalView();
+  closeModal();
+}
+
+
+async function enableOverrideVersion(path, versionId) {
+  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, enabled: true }) });
+  await loadOverrides();
+  closeOverrideVersionModal();
+}
+
+async function deleteOverrideVersion(path, versionId) {
+  const confirmed = await showConfirm('确定删除该版本？', '删除确认', '删除');
+  if (!confirmed) return;
+  
+  await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
+  await loadOverrides();
+  
+  // 如果还有版本，重新打开版本管理窗口
+  const versions = overrides[path] || [];
+  if (versions.length > 0) {
+    closeOverrideVersionModal();
+    openOverrideVersionModal(path, versions);
+  } else {
+    closeOverrideVersionModal();
+  }
+}
+
+function editOverrideVersion(path, versionId) {
+  const versions = overrides[path] || [];
+  const version = versions.find(v => v.id === versionId);
+  if (!version) return;
+  const versionIndex = versions.findIndex(v => v.id === versionId);
+  
+  let content = version.content || '{}';
+  const currentPriority = version.priority ?? 1;
+  const currentRemark = version.remark || '';
+  
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
-  openModal('修改返回值', path, content, async (newContent) => {
+  
+  const editor = document.getElementById('jsonEditor');
+  if (editor) editor.style.display = 'block';
+  const modal = document.getElementById('jsonModal');
+  if (modal) modal.classList.add('version-layout');
+  
+  openModal('编辑临时修改版本', path, content, async (newContent) => {
+    const priority = parseInt(document.getElementById('modalPriority').value) || 1;
+    const remark = document.getElementById('modalRemark').value.trim();
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, content: newContent, priority, remark }) });
+    await loadOverrides();
+  }, false, true, currentPriority, currentRemark);
+
+  // 在编辑区域上方的色带中突出当前正在编辑的版本信息
+  let banner = document.getElementById('versionEditorBanner');
+  if (!banner && editor) {
+    editor.insertAdjacentHTML('beforebegin', '<div id="versionEditorBanner" class="version-editor-banner"></div>');
+    banner = document.getElementById('versionEditorBanner');
+  }
+  if (banner) {
+    const safeRemark = version.remark ? escapeHtml(version.remark) : '';
+    let html = '<span class="version-editor-title">编辑版本 ' + (versionIndex + 1) + '</span>';
+    if (safeRemark) {
+      html += '<span class="version-remark-pill" style="margin-left:6px" title="' + safeRemark + '">备注: ' + safeRemark + '</span>';
+    }
+    banner.innerHTML = html;
+  }
+}
+
+function createNewOverrideVersion(path) {
+  const versions = overrides[path] || [];
+  let content = '{}';
+  const enabledVersion = versions.find(v => v.enabled);
+  if (enabledVersion && enabledVersion.content) {
+    content = enabledVersion.content;
+  }
+  try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
+  
+  const editor = document.getElementById('jsonEditor');
+  if (editor) editor.style.display = 'block';
+  const modal = document.getElementById('jsonModal');
+  if (modal) modal.classList.add('version-layout');
+  
+  openModal('创建临时修改', path, content, async (newContent) => {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
-    overrides[path] = { content: newContent, enabled: true, priority, remark };
-    // 刷新所有列表，因为优先级变化会影响其他项的可达性
-    renderOverrides();
-    renderMappings();
-    renderFolderMappings();
+    await loadOverrides();
+    if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+  }, false, true, enabledVersion ? (enabledVersion.priority ?? 1) : 1, enabledVersion ? (enabledVersion.remark || '') : '');
+  
+  // 在编辑区域上方的色带中显示“正在新建版本”，以及可选的基准版本备注
+  let banner = document.getElementById('versionEditorBanner');
+  if (!banner && editor) {
+    editor.insertAdjacentHTML('beforebegin', '<div id="versionEditorBanner" class="version-editor-banner"></div>');
+    banner = document.getElementById('versionEditorBanner');
+  }
+  if (banner) {
+    let html = '<span class="version-editor-title">新建版本</span>';
+    if (enabledVersion && enabledVersion.remark) {
+      const safeRemark = escapeHtml(enabledVersion.remark);
+      html += '<span class="version-remark-pill" style="margin-left:6px" title="' + safeRemark + '">基于: ' + safeRemark + '</span>';
+    }
+    banner.innerHTML = html;
+  }
+}
+
+async function setTempOverride(path, originalContent, showFileActions = false) {
+  const versions = overrides[path] || [];
+  
+  // 如果有多个版本，显示版本管理弹窗
+  if (versions.length > 1) {
+    openOverrideVersionModal(path, versions);
+    return;
+  }
+  
+  // 如果只有一个版本，直接编辑
+  if (versions.length === 1) {
+    editOverrideVersion(path, versions[0].id);
+    return;
+  }
+  
+  // 如果没有版本，创建新版本
+  const enabledVersion = versions.find(v => v.enabled);
+  
+  // 使用启用的版本内容，如果没有则使用原始内容
+  let content = enabledVersion ? enabledVersion.content : originalContent;
+  const currentPriority = enabledVersion ? (enabledVersion.priority ?? 1) : 1;
+  const currentRemark = enabledVersion ? (enabledVersion.remark || '') : '';
+  
+  try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
+  
+  openModal('创建临时修改', path, content, async (newContent) => {
+    const priority = parseInt(document.getElementById('modalPriority').value) || 1;
+    const remark = document.getElementById('modalRemark').value.trim();
+    
+    // 创建新版本（不指定 versionId）
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
+    await loadOverrides();
+    
     if (activeLogIdx !== null) showLogDetail(activeLogIdx);
   }, showFileActions, true, currentPriority, currentRemark);
 }
@@ -1079,16 +1439,16 @@ async function showFileDetail(filePath) {
   if (!file) return;
   let content = file.content;
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
-  const hasOverride = overrides[filePath];
+  const fileHasOverride = hasOverride(filePath);
   const hasMapping = mappings[filePath];
   panel.innerHTML =
     '<div class="meta-row"><div class="meta-item">' + filePath + '</div>' +
-    (hasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') +
+    (fileHasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') +
     (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + '</div>' +
     '<div class="detail-content" style="max-height:380px"><pre>' + escapeHtml(content) + '</pre></div>' +
     '<div style="margin-top:10px"><button class="btn btn-primary" onclick="editLocalFile(\'' + filePath.replace(/'/g, "\\'") + '\')">永久修改</button> ' +
     '<button class="btn btn-warning" onclick="setTempOverrideFromFile(\'' + filePath.replace(/'/g, "\\'") + '\')">临时修改</button>' +
-    (hasOverride ? ' <button class="btn btn-danger" onclick="removeOverrideAndRefresh(\'' + filePath.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + '</div>';
+    (fileHasOverride ? ' <button class="btn btn-danger" onclick="removeOverrideAndRefresh(\'' + filePath.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + '</div>';
   panel.classList.add('active');
 }
 
@@ -1617,7 +1977,7 @@ function showLogDetail(idx) {
     return '<div style="margin-top:10px"><strong style="cursor:pointer" onclick="toggleLogHeaders(\'' + type + '\')">' + title + ' ' + (collapsed ? '▶' : '▼') + '</strong></div><div class="detail-content" style="' + (collapsed ? 'display:none;' : '') + 'max-height:150px">' + content + '</div>';
   };
 
-  const hasOverride = overrides[l.path] && overrides[l.path].enabled;
+  const logHasOverride = hasOverride(l.path);
   const hasMapping = mappings[l.path] && mappings[l.path].enabled;
   const isMissing = l.found !== true && l.found !== 'mapping';
   const isMapping = l.found === 'mapping';
@@ -1747,14 +2107,14 @@ function showLogDetail(idx) {
     '<div class="detail-content">' + headerTable(l.headers) + '</div>';
 
   panel.innerHTML =
-    '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status ' + statusClass + '">' + statusText + '</span></div>' + (hasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') + (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + '</div>' +
+    '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status ' + statusClass + '">' + statusText + '</span></div>' + (logHasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') + (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + '</div>' +
     (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
     '<div style="margin-bottom:10px">' + 
     (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">创建文件</button> ' : '') + 
     '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ')">修改返回</button> ' +
     '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
-    (hasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
+    (logHasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
     (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + 
     '</div>' +
     (hasPage ? '<div class="detail-tabs">' + tabBtn('response', '详情') + tabBtn('page', 'Page') + '</div>' +
