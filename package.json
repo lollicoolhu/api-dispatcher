@@ -1,0 +1,15 @@
+{
+  "name": "mock-api-server",
+  "version": "1.0.0",
+  "description": "A lightweight mock API server with HTTP/HTTPS support",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server-http.js",
+    "start:http": "node server-http.js",
+    "start:https": "node server-https.js",
+    "start:both": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1"
+  }
+}

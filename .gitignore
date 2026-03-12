@@ -3,3 +3,5 @@ node_modules/
 *.log
 public/
 !public/.mock-server-data.json
+.env
+certs/

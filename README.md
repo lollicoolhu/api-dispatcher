@@ -15,16 +15,83 @@
 ## 快速开始
 
 ```bash
-# 启动服务器，默认使用 mock 文件夹
-node server.js
+# 安装依赖
+npm install
 
-# 指定数据文件夹
-node server.js cash
+# 启动 HTTP 服务器（推荐）
+node server-http.js
+
+# 或启动 HTTPS 服务器
+node server-https.js
+
+# 或同时启动 HTTP 和 HTTPS（需要配置 .env）
+node server.js
 ```
 
-服务器启动后：
-- API 地址: `http://127.0.0.1:3000`
-- 管理后台: `http://127.0.0.1:3000/admin`
+### HTTP 服务器
+
+最简单的启动方式，无需额外配置：
+
+```bash
+node server-http.js
+```
+
+访问地址：
+- API: http://localhost:3000
+- 管理后台: http://localhost:3000/admin
+
+### HTTPS 服务器
+
+需要先生成证书：
+
+1. 生成自签名证书（用于开发测试）：
+```bash
+mkdir certs
+openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt -days 365 -nodes
+```
+
+2. （可选）创建 `.env` 文件自定义端口和证书路径：
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`：
+```env
+HTTPS_PORT=3443
+HTTPS_KEY_PATH=./certs/server.key
+HTTPS_CERT_PATH=./certs/server.crt
+```
+
+3. 启动 HTTPS 服务器：
+```bash
+node server-https.js
+```
+
+访问地址：
+- API: https://localhost:3443
+- 管理后台: https://localhost:3443/admin
+
+注意：自签名证书会在浏览器中显示安全警告，这在开发环境中是正常的。
+
+### 同时启动 HTTP 和 HTTPS
+
+如果需要同时提供 HTTP 和 HTTPS 访问：
+
+1. 创建 `.env` 文件并配置：
+```env
+HTTP_PORT=3000
+HTTPS_ENABLED=true
+HTTPS_PORT=3443
+HTTPS_KEY_PATH=./certs/server.key
+HTTPS_CERT_PATH=./certs/server.crt
+```
+
+2. 启动服务器：
+```bash
+node server.js
+```
+
+这样 HTTP 和 HTTPS 会同时运行在不同端口。
 
 ## 目录结构
 

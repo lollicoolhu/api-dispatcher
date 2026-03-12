@@ -9,6 +9,7 @@ lib/
 ├── logger.js           # 日志管理
 ├── admin-routes.js     # 管理接口路由
 ├── request-handler.js  # 请求处理逻辑
+├── server-core.js      # 服务器核心逻辑
 └── README.md          # 本文件
 ```
 
@@ -37,7 +38,7 @@ lib/
 **导出方法：**
 - `rewriteSetCookie(cookies, reqHost, cookieRewrite)` - 重写 Set-Cookie header
 - `getAllFiles(dir, base)` - 递归获取所有 JSON 文件
-- `getServerAddresses(port)` - 获取服务器地址列表
+- `getServerAddresses(port, httpsPort)` - 获取服务器地址列表（包含 HTTP 和 HTTPS）
 
 ### logger.js
 管理访问日志。
@@ -51,7 +52,7 @@ lib/
 处理所有管理接口路由。
 
 **导出方法：**
-- `handleAdminRoutes(req, res, config, saveData)` - 处理管理路由，返回 true 表示已处理
+- `handleAdminRoutes(req, res, config, saveData, httpPort, httpsPort)` - 处理管理路由，返回 true 表示已处理
 
 **处理的路由：**
 - 静态文件：`/admin`, `/admin.css`, `/admin.js`
@@ -72,18 +73,40 @@ lib/
 3. 选择优先级最高的源
 4. 根据源类型返回响应（本地文件或代理请求）
 
+### server-core.js
+服务器核心逻辑，统一管理 HTTP 和 HTTPS 服务器的创建和启动。
+
+**导出方法：**
+- `startHttpServer(port)` - 启动 HTTP 服务器
+- `startHttpsServer(port, keyPath, certPath)` - 启动 HTTPS 服务器
+- `startBothServers(httpPort, httpsPort, keyPath, certPath)` - 同时启动 HTTP 和 HTTPS 服务器
+
+**核心功能：**
+- 创建请求处理函数
+- 显示配置信息（本地文件夹、全局服务器）
+- 统一的服务器启动逻辑
+- 证书文件检查和错误处理
+
 ## 主入口文件
 
 ### server.js
-主入口文件，负责创建 HTTP 服务器并协调各模块。
+主入口文件，同时启动 HTTP 和 HTTPS（通过 .env 配置）。
+
+### server-http.js
+纯 HTTP 服务器入口，最简单，无需额外配置。
+
+### server-https.js
+纯 HTTPS 服务器入口，需要证书文件。
 
 **代码行数对比：**
 - 旧版 server.js: ~976 行
-- 新版 server.js: ~45 行
-- 模块总计: ~600 行
+- 新版入口文件: ~10 行
+- 核心模块: ~650 行
 
 **优势：**
 - 代码结构清晰，职责分明
+- 避免重复代码，统一维护
 - 易于维护和扩展
 - 便于单元测试
 - 减少主文件复杂度
+- 支持按需部署（HTTP/HTTPS/Both）
