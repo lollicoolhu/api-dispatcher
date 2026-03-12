@@ -1168,7 +1168,12 @@ function renderResponseContent(body, headers, id, isBase64) {
   // 可展示的类型
   let formatted = body || '';
   try { formatted = JSON.stringify(JSON.parse(formatted), null, 2); } catch { }
-  return '<pre>' + escapeHtml(formatted) + '</pre>';
+  
+  // 添加复制按钮
+  return '<div style="position:relative">' +
+    '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(\'' + id + '\', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
+    '<pre>' + escapeHtml(formatted) + '</pre>' +
+    '</div>';
 }
 
 // 下载响应内容
@@ -1197,6 +1202,64 @@ function downloadResponseContent(logIdx) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// 复制响应内容
+function copyResponseContent(logIdx, event) {
+  const l = logs[logIdx];
+  if (!l) return;
+  
+  let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+  
+  // 如果是 JSON，格式化后复制
+  try {
+    body = JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    // 不是 JSON，直接复制原始内容
+  }
+  
+  // 使用 Clipboard API 复制
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(body).then(() => {
+      // 显示复制成功提示
+      const btn = event ? event.target : null;
+      if (btn) {
+        const originalText = btn.textContent;
+        btn.textContent = '✓ 已复制';
+        btn.style.background = '#28a745';
+        setTimeout(() => {
+          btn.textContent = originalText;
+          btn.style.background = '';
+        }, 2000);
+      }
+    }).catch(err => {
+      alert('复制失败: ' + err.message);
+    });
+  } else {
+    // 降级方案：使用 textarea
+    const textarea = document.createElement('textarea');
+    textarea.value = body;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      const btn = event ? event.target : null;
+      if (btn) {
+        const originalText = btn.textContent;
+        btn.textContent = '✓ 已复制';
+        btn.style.background = '#28a745';
+        setTimeout(() => {
+          btn.textContent = originalText;
+          btn.style.background = '';
+        }, 2000);
+      }
+    } catch (err) {
+      alert('复制失败: ' + err.message);
+    }
+    document.body.removeChild(textarea);
+  }
 }
 
 // 解析 x-bbae-page header
@@ -1643,7 +1706,12 @@ function showLogDetail(idx) {
     let responseBody;
     try { responseBody = JSON.stringify(JSON.parse(text), null, 2); } catch { responseBody = text; }
     const respContent = document.getElementById('logResponseContent');
-    if (respContent) respContent.innerHTML = '<pre>' + escapeHtml(responseBody) + '</pre>';
+    if (respContent) {
+      respContent.innerHTML = '<div style="position:relative">' +
+        '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(' + idx + ', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
+        '<pre>' + escapeHtml(responseBody) + '</pre>' +
+        '</div>';
+    }
     const resHeadersEl = document.getElementById('logResHeaders');
     if (resHeadersEl) resHeadersEl.innerHTML = headerTable(resHeaders);
     window.currentLogResponse = text;
