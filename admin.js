@@ -762,7 +762,7 @@ function confirmResolve(result) {
 // ========== JSON Editor Modal ==========
 let currentModalPath = '';
 
-function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '') {
+function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '') {
   const titleEl = document.getElementById('modalTitle');
   const pathEl = document.getElementById('modalPath');
   const editorEl = document.getElementById('jsonEditor');
@@ -780,6 +780,23 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
   if (permanentBtn) permanentBtn.style.display = showFileActions ? 'inline-block' : 'none';
   if (deleteBtn) deleteBtn.style.display = showFileActions ? 'inline-block' : 'none';
   
+  // 显示/隐藏文件夹选择
+  const folderDiv = document.getElementById('modalFolderDiv');
+  if (folderDiv) {
+    if (showFolderSelect) {
+      folderDiv.style.display = 'flex';
+      const folderSelect = document.getElementById('modalFolderSelect');
+      if (folderSelect) {
+        folderSelect.innerHTML = publicFolders.map(f => {
+          const name = f.path.replace(/^public\//, '');
+          return '<option value="' + name + '">' + name + '</option>';
+        }).join('') + '<option value="__new__">+ 新建文件夹...</option>';
+      }
+    } else {
+      folderDiv.style.display = 'none';
+    }
+  }
+
   // 显示/隐藏优先级输入
   const priorityDiv = document.getElementById('modalPriorityDiv');
   const priorityInput = document.getElementById('modalPriority');
@@ -809,17 +826,33 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
     modal.classList.add('active');
     const footer = modal.querySelector('.modal-footer');
     if (footer) {
+      const finalSaveText = saveBtnText || (showFolderSelect ? '保存' : '临时保存');
       footer.innerHTML =
         '<button class="btn btn-danger" id="modalDeleteBtn" style="display:none" onclick="deleteFileFromModal()">删除文件</button>' +
         '<button class="btn btn-success" id="modalPermanentBtn" style="display:none" onclick="savePermanentFromModal()">永久保存</button>' +
         '<button class="btn btn-secondary" onclick="formatJson()">格式化</button>' +
         '<button class="btn btn-secondary" onclick="closeModal()">取消</button>' +
-        '<button class="btn btn-primary" id="modalSaveBtn">临时保存</button>';
+        '<button class="btn btn-primary" id="modalSaveBtn">' + finalSaveText + '</button>';
+      
+      const newDeleteBtn = document.getElementById('modalDeleteBtn');
+      const newPermanentBtn = document.getElementById('modalPermanentBtn');
+      if (newDeleteBtn) newDeleteBtn.style.display = showFileActions ? 'inline-block' : 'none';
+      if (newPermanentBtn) newPermanentBtn.style.display = showFileActions ? 'inline-block' : 'none';
+
       const saveBtn = document.getElementById('modalSaveBtn');
       if (saveBtn) {
         saveBtn.onclick = handleModalSaveClick;
       }
     }
+  }
+}
+
+function handleModalFolderChange() {
+  const select = document.getElementById('modalFolderSelect');
+  if (select && select.value === '__new__') {
+    document.getElementById('newFolderName').value = '';
+    document.getElementById('newFolderModal').classList.add('active');
+    window.newFolderTarget = 'modalFolderSelect';
   }
 }
 
@@ -2182,7 +2215,7 @@ function showLogDetail(idx) {
       (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">本地: ' + l.path + '</div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
-      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
+      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', ' + l.idx + ')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
       '<div class="detail-tabs">' + tabBtn('access', '访问请求') + tabBtn('proxy', '映射请求') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'access' || logDetailTab === 'response' || logDetailTab === 'request' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'proxy' ? ' active' : '') + '">' + proxyTabHtml + '</div>' +
@@ -2250,7 +2283,7 @@ function showLogDetail(idx) {
     (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
     '<div style="margin-bottom:10px">' + 
-    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">创建文件</button> ' : '') + 
+    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', ' + l.idx + ')">创建文件</button> ' : '') + 
     '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ')">修改返回</button> ' +
     '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
     (logHasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
@@ -2269,14 +2302,37 @@ async function removeMappingAndRefreshLog(apiPath) {
   showLogDetail(activeLogIdx);
 }
 
-function createMissingFile(apiPath) {
-  const defaultContent = JSON.stringify({ Outcome: "Success", Message: "Success", Data: {} }, null, 2);
-  openModal('创建接口文件 (永久保存)', apiPath, defaultContent, async (content) => {
-    const res = await fetch('/admin/file/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, content }) });
+function createMissingFile(apiPath, logIdx) {
+  let initialContent = JSON.stringify({ Outcome: "Success", Message: "Success", Data: {} }, null, 2);
+  
+  if (logIdx !== undefined && logs[logIdx]) {
+    const l = logs[logIdx];
+    let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+    if (body !== undefined && body !== null && body !== '') {
+      try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
+      initialContent = body;
+    }
+  }
+
+  // openModal signature: title, path, content, onSave, showFileActions, showPriority, currentPriority, currentRemark, showFolderSelect
+  openModal('创建接口文件 (永久保存)', apiPath, initialContent, async (content) => {
+    const folderSelect = document.getElementById('modalFolderSelect');
+    let folder = '';
+    if (folderSelect && document.getElementById('modalFolderDiv').style.display !== 'none') {
+       const selectedValue = folderSelect.value;
+       if (selectedValue && selectedValue !== '__new__') {
+         folder = 'public/' + selectedValue;
+       }
+    }
+    const res = await fetch('/admin/file/create', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ path: apiPath, content, folder }) 
+    });
     const result = await res.json();
     if (result.success) { alert('创建成功'); refreshLogs(); }
     else alert('创建失败: ' + result.error);
-  });
+  }, false, false, 1, '', true);
 }
 
 function editLocalFileFromLog(apiPath) {
@@ -2595,8 +2651,12 @@ function closeNewFolderModal() {
   document.getElementById('newFolderModal').classList.remove('active');
   // 恢复下拉框选择
   const select = document.getElementById('logBatchFolder');
-  if (select.value === '__new__') {
+  if (select && select.value === '__new__') {
     select.selectedIndex = 0;
+  }
+  const modalSelect = document.getElementById('modalFolderSelect');
+  if (modalSelect && modalSelect.value === '__new__') {
+    modalSelect.selectedIndex = 0;
   }
 }
 
@@ -2635,14 +2695,21 @@ async function createNewFolder() {
       await loadPublicFolders();
       
       // 更新下拉框
-      const select = document.getElementById('logBatchFolder');
-      select.innerHTML = publicFolders.map(f => {
-        const name = f.path.replace(/^public\//, '');
-        return '<option value="' + name + '"' + (f.path === folderPath ? ' selected' : '') + '>' + name + '</option>';
-      }).join('');
-      select.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
-      select.value = folderName;
-      
+      const selects = [document.getElementById('logBatchFolder'), document.getElementById('modalFolderSelect')];
+      selects.forEach(select => {
+        if (!select) return;
+        select.innerHTML = publicFolders.map(f => {
+          const name = f.path.replace(/^public\//, '');
+          return '<option value="' + name + '"' + (f.path === folderPath ? ' selected' : '') + '>' + name + '</option>';
+        }).join('');
+        select.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
+        
+        if (select.id === window.newFolderTarget || select.id === 'logBatchFolder') {
+          select.value = folderName;
+        }
+      });
+      window.newFolderTarget = null;
+
       closeNewFolderModal();
     } else {
       alert('创建失败: ' + result.error);
