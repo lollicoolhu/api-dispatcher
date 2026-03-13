@@ -4,4 +4,4 @@ node_modules/
 public/
 .env
 certs/
-.mock-server-data.json
+.config.json

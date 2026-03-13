@@ -5,6 +5,7 @@ let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folde
 let modalCallback = null, mappingTestTab = 'response';
 let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
 let publicFolders = [];
+let masterConfig = { externalFolderPath: '' };
 
 // 辅助函数：获取路径的启用版本
 function getEnabledOverride(path) {
@@ -41,10 +42,45 @@ Promise.all([
   renderFolderMappings();
 });
 loadCookieRewrite();
+loadMasterConfig();
 
-// 加载 public 文件夹列表
+async function loadMasterConfig() {
+  const res = await fetch('/admin/master-config');
+  const data = await res.json();
+  masterConfig = data;
+  document.getElementById('currentDataRootDisplay').textContent = data.effectiveDataRoot;
+}
+
+// ========== 数据目录选择器 (系统级) ==========
+async function selectSystemFolder() {
+  const res = await fetch('/admin/system/select-folder', { method: 'POST' });
+  const result = await res.json();
+  
+  if (result.success && result.path) {
+    if (confirm('确定将存储目录切换至：\n' + result.path + ' ?')) {
+      const saveRes = await fetch('/admin/master-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ externalFolderPath: result.path })
+      });
+      const saveResult = await saveRes.json();
+      if (saveResult.success) {
+        alert('存储目录已切换');
+        location.reload();
+      } else {
+        alert('切换失败: ' + saveResult.error);
+      }
+    }
+  } else if (result.error) {
+    if (result.error !== '用户取消选择或发生系统错误') {
+      alert('选择失败: ' + result.error);
+    }
+  }
+}
+
+// 加载文件夹列表
 async function loadPublicFolders(currentFolder) {
-  const res = await fetch('/admin/public-folders');
+  const res = await fetch('/admin/folders');
   const data = await res.json();
   publicFolders = data.folders || [];
   
@@ -55,7 +91,7 @@ async function loadPublicFolders(currentFolder) {
       '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
     ).join('');
     if (publicFolders.length === 0) {
-      harSelect.innerHTML = '<option value="public/mock">mock</option>';
+      harSelect.innerHTML = '<option value="mock">mock</option>';
     }
   }
   
@@ -198,7 +234,7 @@ function startAutoRefresh() {
   if (logRefreshTimer) return;
   if (document.getElementById('logAutoRefresh').checked) {
     const interval = parseInt(document.getElementById('logRefreshInterval').value) || 1000;
-    logRefreshTimer = setInterval(refreshLogs, interval);
+    logRefreshTimer = setInterval(() => refreshLogs(true), interval);
   }
 }
 function stopAutoRefresh() {
@@ -556,7 +592,7 @@ function switchMappingTestTab(tab) {
 // ========== 文件夹映射管理 ==========
 async function loadFolderMappings(autoRender = true) {
   // 先刷新文件夹列表，确保 publicFolders 是最新的
-  const folderRes = await fetch('/admin/public-folders');
+  const folderRes = await fetch('/admin/folders');
   const folderData = await folderRes.json();
   publicFolders = folderData.folders || [];
   
@@ -791,7 +827,7 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
           const name = f.path.replace(/^public\//, '');
           return '<option value="' + name + '">' + name + '</option>';
         }).join('');
-        folderSelect.innerHTML = '<option value="">默认 (public/mock)</option>' + optionsHtml + '<option value="__new__">+ 新建文件夹...</option>';
+        folderSelect.innerHTML = '<option value="mock">mock</option>' + optionsHtml + '<option value="__new__">+ 新建文件夹...</option>';
       }
     } else {
       folderDiv.style.display = 'none';
@@ -1704,7 +1740,7 @@ function renderPageInfo(pageHeader) {
   const info = parsePageInfo(pageHeader);
   if (!info) return '<em>无页面信息</em>';
   
-  console.log('Parsed page info:', info); // 调试信息
+
   
   let html = '<div style="margin-bottom:12px"><strong>Activity</strong></div>';
   html += '<div class="detail-content" style="padding:10px;margin-bottom:15px;background:#e3f2fd;border-left:3px solid #2196f3"><span style="color:#1976d2;font-weight:bold;font-size:14px">' + escapeHtml(info.activity) + '</span></div>';
@@ -1716,8 +1752,6 @@ function renderPageInfo(pageHeader) {
     info.fragments.forEach((f, idx) => {
       // 根据层级深度设置左边距
       const marginLeft = f.depth * 24;
-      
-      console.log('Fragment:', f.name, 'depth:', f.depth, 'marginLeft:', marginLeft, 'visible:', f.visible); // 调试信息
       
       // 可见状态样式
       const bgColor = f.visible ? '#e8f5e9' : '#f5f5f5';
@@ -1751,18 +1785,20 @@ function renderPageInfo(pageHeader) {
 
 
 // ========== 访问日志 ==========
-async function refreshLogs() {
+async function refreshLogs(skipDetail = false) {
   const res = await fetch('/admin/logs');
   logs = await res.json();
   document.getElementById('logCount').textContent = logs.length;
   renderLogs();
   
-  // 如果当前有选中的日志，且它还在列表中，则刷新详情板内容
+  // 如果当前有选中的日志，且它还在列表中，则决定是否刷新详情板内容
   if (activeLogId !== null) {
       const exists = logs.some(l => l.id === activeLogId);
       if (exists) {
-          // 仅重新填充详情板，不通过 showLogDetail 触发 renderLogs 循环
-          updateLogDetailContent(activeLogId);
+          // 如果 skipDetail 为 true (自动刷新时)，则仅维持列表选中态，不刷新详情板避免闪烁或重置视图
+          if (!skipDetail) {
+              updateLogDetailContent(activeLogId);
+          }
       } else {
           activeLogId = null;
           document.getElementById('logDetailPanel').classList.remove('active');
@@ -2041,7 +2077,9 @@ function renderLogs() {
         });
         html += '</div>';
       }
+      const scrollPos = container.scrollTop;
       container.innerHTML = html;
+      container.scrollTop = scrollPos;
       return;
     } else {
       // 仅按页面分组，并且保持时间顺序显示（不按独立路径聚合）
@@ -2089,7 +2127,9 @@ function renderLogs() {
           html += renderLogItem(mixed.item, true);
         }
       });
+      const scrollPos = container.scrollTop;
       container.innerHTML = html;
+      container.scrollTop = scrollPos;
       return;
     }
   }
@@ -2126,9 +2166,13 @@ function renderLogs() {
       });
       html += '</div>';
     }
+    const scrollPos = container.scrollTop;
     container.innerHTML = html;
+    container.scrollTop = scrollPos;
   } else {
+    const scrollPos = container.scrollTop;
     container.innerHTML = filtered.map(l => renderLogItem(l, true)).join('');
+    container.scrollTop = scrollPos;
   }
 }
 
@@ -2167,10 +2211,27 @@ function showLogDetail(logId) {
     return '<div style="margin-top:10px"><strong style="cursor:pointer" onclick="toggleLogHeaders(\'' + type + '\')">' + title + ' ' + (collapsed ? '▶' : '▼') + '</strong></div><div class="detail-content" style="' + (collapsed ? 'display:none;' : '') + 'max-height:150px">' + content + '</div>';
   };
 
+  // 状态处理
+  const isMapping = l.found === 'mapping';
+  const mr = l.mappingResponse;
+  const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
+  const hasPage = !!pageHeader;
+
+  // 针对映射日志，确保 Tab 选中态有效 (映射日志没有 'response' tab，只有 'access' 和 'proxy')
+  if (isMapping) {
+      if (logDetailTab === 'response' || logDetailTab === 'request') {
+          logDetailTab = 'access';
+      }
+  } else {
+      // 普通日志转映射日志时，如果选中了 'proxy'，重置回 'response'
+      if (logDetailTab === 'access' || logDetailTab === 'proxy') {
+          logDetailTab = 'response';
+      }
+  }
+
   const logHasOverride = hasOverride(l.path);
   const hasMapping = mappings[l.path] && mappings[l.path].enabled;
   const isMissing = l.found !== true && l.found !== 'mapping';
-  const isMapping = l.found === 'mapping';
   const statusText = l.found === true ? '本地' : l.found === 'mapping' ? '映射' : '404';
   const statusClass = l.found === true ? 'found' : l.found === 'mapping' ? 'mapping' : 'missing';
 
@@ -2180,8 +2241,6 @@ function showLogDetail(logId) {
     let proxyBody = mr.body || '';
     try { proxyBody = JSON.stringify(JSON.parse(proxyBody), null, 2); } catch { }
     const mrStatusClass = mr.status >= 200 && mr.status < 300 ? 'status-2xx' : mr.status >= 400 && mr.status < 500 ? 'status-4xx' : 'status-5xx';
-    const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
-    const hasPage = !!pageHeader;
     
     // 访问请求 Tab（客户端 -> 本地服务器）
     let reqBodyFormatted = l.body || '';
@@ -2235,7 +2294,7 @@ function showLogDetail(logId) {
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
       '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', false, \'' + logId + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
       '<div class="detail-tabs">' + tabBtn('access', '访问请求') + tabBtn('proxy', '映射请求') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
-      '<div class="tab-content' + (logDetailTab === 'access' || logDetailTab === 'response' || logDetailTab === 'request' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
+      '<div class="tab-content' + (logDetailTab === 'access' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'proxy' ? ' active' : '') + '">' + proxyTabHtml + '</div>' +
       (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '');
     panel.classList.add('active');
@@ -2244,8 +2303,6 @@ function showLogDetail(logId) {
   }
 
   // 普通请求
-  const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
-  const hasPage = !!pageHeader;
   
   // 异步获取响应内容
   fetch(l.path).then(r => {
@@ -2286,6 +2343,7 @@ function showLogDetail(logId) {
     '<div class="detail-content"><table>' +
     '<tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr>' +
     '<tr><td>路径</td><td>' + l.path + '</td></tr>' +
+    (l.actualPath ? '<tr><td>实际文件路径</td><td style="word-break:break-all">' + l.actualPath + '</td></tr>' : '') +
     '<tr><td>完整URL</td><td>' + (l.fullUrl || l.path) + '</td></tr>' +
     '<tr><td>访问时间</td><td>' + l.time + '</td></tr>' +
     '<tr><td>客户端IP</td><td>' + l.ip + '</td></tr>' +
@@ -2342,7 +2400,7 @@ function createMissingFile(apiPath, logId) {
     if (folderSelect && document.getElementById('modalFolderDiv').style.display !== 'none') {
        const selectedValue = folderSelect.value;
        if (selectedValue && selectedValue !== '__new__') {
-         folder = 'public/' + selectedValue;
+         folder = selectedValue; // Use relative path
        }
     }
     const res = await fetch('/admin/file/create', { 
@@ -2584,7 +2642,7 @@ function showDetail(id) {
 }
 
 function getSelectedFiles() {
-  const folder = document.getElementById('outputFolder').value || 'public/mock';
+  const folder = document.getElementById('outputFolder').value || 'mock';
   const keepLast = document.getElementById('keepLast').checked;
   const pretty = document.getElementById('prettyJson').checked;
   const selected = entries.filter(e => selectedIds.has(e.id));
@@ -2618,7 +2676,7 @@ function openLogBatchSave() {
   // 填充文件夹下拉框
   const folderSelect = document.getElementById('logBatchFolder');
   const serverFolderSelect = document.getElementById('serverFolderSelect');
-  const currentFolder = serverFolderSelect ? serverFolderSelect.value : 'public/mock';
+  const currentFolder = serverFolderSelect ? serverFolderSelect.value : 'mock';
   
   // 移除 public/ 前缀显示
   const currentFolderName = currentFolder.replace(/^public\//, '');
@@ -2673,8 +2731,7 @@ function closeLogBatchSave() {
 
 function handleLogBatchFolderChange() {
   const select = document.getElementById('logBatchFolder');
-  if (select.value === '__new__') {
-    // 打开新建文件夹模态框
+  if (select && select.value === '__new__') {
     document.getElementById('newFolderName').value = '';
     document.getElementById('newFolderModal').classList.add('active');
     window.newFolderTarget = 'logBatchFolder';
@@ -2707,10 +2764,10 @@ async function createNewFolder() {
     return;
   }
   
-  const folderPath = 'public/' + folderName;
+  const folder = folderName; // Use relative path
   
   // 检查是否已存在
-  if (publicFolders.some(f => f.path === folderPath)) {
+  if (publicFolders.some(f => f.path === folder)) { 
     alert('文件夹已存在');
     return;
   }
@@ -2719,7 +2776,7 @@ async function createNewFolder() {
     const res = await fetch('/admin/folder/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: folderName })
+      body: JSON.stringify({ name: folder }) // Send relative path
     });
     const result = await res.json();
     if (result.success) {
@@ -2731,8 +2788,8 @@ async function createNewFolder() {
       selects.forEach(select => {
         if (!select) return;
         select.innerHTML = publicFolders.map(f => {
-          const name = f.path.replace(/^public\//, '');
-          return '<option value="' + name + '"' + (f.path === folderPath ? ' selected' : '') + '>' + name + '</option>';
+          const name = f.name;
+          return '<option value="' + name + '"' + (f.path === folder ? ' selected' : '') + '>' + name + '</option>';
         }).join('');
         select.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
         
@@ -2941,8 +2998,7 @@ async function saveLogBatchToServer() {
     return;
   }
   
-  // 确保文件夹路径以 public/ 开头
-  const folder = folderInput.startsWith('public/') ? folderInput : 'public/' + folderInput;
+  const folder = folderInput;
   
   const data = {};
   logBatchSelectedIds.forEach(idx => {
