@@ -1736,7 +1736,6 @@ async function clearLogs() {
   document.getElementById('logDetailPanel').classList.remove('active');
   refreshLogs();
 }
-
 function renderLogs() {
   const search = document.getElementById('logSearch').value.toLowerCase();
   const statusFilter = document.getElementById('logStatusFilter').value;
@@ -1848,61 +1847,201 @@ function renderLogs() {
       '</div>';
   };
 
-  // 按父请求分组（HTML页面及其资源）
+  // 按页面分组的基础数据结构：找出所有 HTML 页面作为 Session，将相关子资源关联进去
   if (groupByParent) {
-    // 找出所有 HTML 请求作为父请求
-    const parentLogs = [];
-    const childrenMap = {}; // parentPath -> children[]
+    const sessions = []; // 存放所有 HTML 页面的 Session
+    const standaloneLogs = []; // 未归属任何页面的独立请求
     
+    // Pass 1: 找出所有的 HTML 页面请求作为独立 Session
     filtered.forEach(l => {
       const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') || 
                      (l.mappingResponse && l.mappingResponse.headers && 
                       (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
-      
-      if (l.parentPath && !isHtml) {
-        // 有父请求的子资源
-        if (!childrenMap[l.parentPath]) childrenMap[l.parentPath] = [];
-        childrenMap[l.parentPath].push(l);
-      } else {
-        // 父请求或无父请求的独立请求
-        parentLogs.push(l);
+      if (isHtml) {
+        sessions.push({ parent: l, children: [] });
       }
     });
     
-    let html = '';
-    parentLogs.forEach(l => {
-      const children = childrenMap[l.path] || [];
-      const hasChildren = children.length > 0;
-      const expanded = expandedLogGroups.has('parent:' + l.idx);
-      const fileType = getFileTypeTag(l.path);
-      const method = l.method || 'GET';
-      const respCode = getResponseCode(l);
-      const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+    // Pass 2: 为子资源匹配最近的 HTML Session
+    filtered.forEach(l => {
+      const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') || 
+                     (l.mappingResponse && l.mappingResponse.headers && 
+                      (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
+      if (isHtml) return; // 页面本身已经被处理
       
-      if (hasChildren) {
-        html += '<div class="group-header" onclick="toggleLogGroup(\'parent:' + l.idx + '\')">' +
+      if (l.parentPath) {
+        let found = false;
+        // 寻找时间最早于资源请求前最近的一次 HTML 加载
+        for (let s of sessions) {
+          if (s.parent.path === l.parentPath && s.parent.time <= l.time) {
+            s.children.push(l);
+            found = true;
+            break;
+          }
+        }
+        // 如果异常找不到，且有同名路径（可能跨天或其他原因），归属给第一个找到的
+        if (!found) {
+          for (let s of sessions) {
+            if (s.parent.path === l.parentPath) {
+              s.children.push(l);
+              found = true;
+              break;
+            }
+          }
+        }
+        if (!found) {
+          standaloneLogs.push(l);
+        }
+      } else {
+        standaloneLogs.push(l);
+      }
+    });
+
+    let html = '';
+
+    // 双重分组：页面独立成组，其他非页面请求按相同接口成组
+    if (groupSame) {
+      const pageGroups = {}; // 页面路径 -> sessions[]
+      sessions.forEach(s => {
+        if (!pageGroups[s.parent.path]) pageGroups[s.parent.path] = [];
+        pageGroups[s.parent.path].push(s);
+      });
+
+      const standaloneGroups = {}; // 独立请求路径 -> logs[]
+      standaloneLogs.forEach(l => {
+        if (!standaloneGroups[l.path]) standaloneGroups[l.path] = [];
+        standaloneGroups[l.path].push(l);
+      });
+
+      // 渲染 HTML 页面折叠组
+      for (const [pagePath, pageSessions] of Object.entries(pageGroups)) {
+        const expandedPage = expandedLogGroups.has('page:' + pagePath);
+        const sessionCount = pageSessions.length;
+        const latestSession = pageSessions[0];
+        const method = latestSession.parent.method || 'GET';
+        const respCode = getResponseCode(latestSession.parent);
+        const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+        const fileType = getFileTypeTag(pagePath);
+        
+        html += '<div class="group-header" onclick="toggleLogGroup(\'page:' + pagePath.replace(/'/g, "\\'") + '\')">' +
+          '<span class="arrow ' + (expandedPage ? 'expanded' : '') + '">▶</span>' +
+          '<span class="method method-' + method + '">' + method + '</span>' +
+          (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
+          '<span class="log-status ' + getStatusClass(latestSession.parent.found) + '">' + getStatusText(latestSession.parent.found) + '</span>' +
+          (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
+          '<span class="path">' + pagePath + '</span>' +
+          '<span class="badge badge-count">' + sessionCount + ' 次会话</span>' +
+          '<span style="color:#666;font-size:11px">' + formatTimeAgo(latestSession.parent.time) + '</span></div>';
+          
+        html += '<div class="group-items ' + (expandedPage ? 'expanded' : '') + '">';
+        
+        pageSessions.forEach(session => {
+          const p = session.parent;
+          const children = session.children;
+          const innerKey = 'session:' + p.idx;
+          const expandedInner = expandedLogGroups.has(innerKey);
+          
+          const innerMethod = p.method || 'GET';
+          const innerRespCode = getResponseCode(p);
+          const innerRespClass = innerRespCode >= 200 && innerRespCode < 300 ? 'status-2xx' : innerRespCode >= 400 && innerRespCode < 500 ? 'status-4xx' : innerRespCode >= 500 ? 'status-5xx' : '';
+          const innerFileType = getFileTypeTag(p.path);
+
+          html += '<div class="group-header" onclick="toggleLogGroup(\'' + innerKey.replace(/'/g, "\\'") + '\')">' +
+            '<span class="arrow ' + (expandedInner ? 'expanded' : '') + '">▶</span>' +
+            '<span class="method method-' + innerMethod + '">' + innerMethod + '</span>' +
+            (innerRespCode ? '<span class="status-code ' + innerRespClass + '">' + innerRespCode + '</span>' : '') +
+            '<span class="log-status ' + getStatusClass(p.found) + '">' + getStatusText(p.found) + '</span>' +
+            (innerFileType ? '<span class="file-type-tag">' + innerFileType + '</span>' : '') +
+            '<span class="path">' + p.path + '</span>' +
+            '<span class="badge badge-count">' + children.length + ' 个资源</span>' +
+            '<span style="color:#666;font-size:11px">' + p.time + '</span></div>';
+          
+          html += '<div class="group-items ' + (expandedInner ? 'expanded' : '') + '">';
+          html += renderLogItem(p, false);
+          children.forEach(c => {
+             html += renderLogItem(c, true, true);
+          });
+          html += '</div>';
+        });
+        html += '</div>';
+      }
+
+      // 渲染独立请求折叠组
+      for (const [path, items] of Object.entries(standaloneGroups)) {
+        const expanded = expandedLogGroups.has('standalone:' + path);
+        const latest = items[0];
+        const timeAgo = formatTimeAgo(latest.time);
+        const fileType = getFileTypeTag(path);
+        const method = latest.method || 'GET';
+        const respCode = getResponseCode(latest);
+        const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+        
+        html += '<div class="group-header" onclick="toggleLogGroup(\'standalone:' + path.replace(/'/g, "\\'") + '\')">' +
           '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
           '<span class="method method-' + method + '">' + method + '</span>' +
           (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
-          '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
+          '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
           (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
-          '<span class="path">' + l.path + '</span>' +
-          '<span class="badge badge-count">' + children.length + '个资源</span>' +
-          '<span style="color:#666;font-size:11px">' + formatTimeAgo(l.time) + '</span></div>';
+          '<span class="path">' + path + '</span>' +
+          '<span class="badge badge-count">' + items.length + '次</span>' +
+          '<span style="color:#666;font-size:11px">' + timeAgo + '</span></div>';
         html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
-        // 父请求本身
-        html += renderLogItem(l, false);
-        // 子资源
-        children.forEach(c => {
-          html += renderLogItem(c, true, true);
+        items.forEach(l => {
+          html += renderLogItem(l, false);
         });
         html += '</div>';
-      } else {
-        html += renderLogItem(l, true);
       }
-    });
-    container.innerHTML = html;
-    return;
+      container.innerHTML = html;
+      return;
+    } else {
+      // 仅按页面分组，并且保持时间顺序显示（不按独立路径聚合）
+      const allMixed = [];
+      sessions.forEach(s => allMixed.push({ type: 'session', item: s }));
+      standaloneLogs.forEach(l => allMixed.push({ type: 'log', item: l }));
+      
+      // 根据时间重新排序，确保渲染顺序正确（按最新时间排序）
+      allMixed.sort((a, b) => {
+        const timeA = a.type === 'session' ? a.item.parent.time : a.item.time;
+        const timeB = b.type === 'session' ? b.item.parent.time : b.item.time;
+        return timeA < timeB ? 1 : timeA > timeB ? -1 : 0;
+      });
+
+      allMixed.forEach(mixed => {
+        if (mixed.type === 'session') {
+          const session = mixed.item;
+          const p = session.parent;
+          const children = session.children;
+          const innerKey = 'session:' + p.idx;
+          const expandedInner = expandedLogGroups.has(innerKey);
+          
+          const innerMethod = p.method || 'GET';
+          const innerRespCode = getResponseCode(p);
+          const innerRespClass = innerRespCode >= 200 && innerRespCode < 300 ? 'status-2xx' : innerRespCode >= 400 && innerRespCode < 500 ? 'status-4xx' : innerRespCode >= 500 ? 'status-5xx' : '';
+          const innerFileType = getFileTypeTag(p.path);
+
+          html += '<div class="group-header" onclick="toggleLogGroup(\'' + innerKey.replace(/'/g, "\\'") + '\')">' +
+            '<span class="arrow ' + (expandedInner ? 'expanded' : '') + '">▶</span>' +
+            '<span class="method method-' + innerMethod + '">' + innerMethod + '</span>' +
+            (innerRespCode ? '<span class="status-code ' + innerRespClass + '">' + innerRespCode + '</span>' : '') +
+            '<span class="log-status ' + getStatusClass(p.found) + '">' + getStatusText(p.found) + '</span>' +
+            (innerFileType ? '<span class="file-type-tag">' + innerFileType + '</span>' : '') +
+            '<span class="path">' + p.path + '</span>' +
+            '<span class="badge badge-count">' + children.length + ' 个资源</span>' +
+            '<span style="color:#666;font-size:11px">' + p.time + '</span></div>';
+          
+          html += '<div class="group-items ' + (expandedInner ? 'expanded' : '') + '">';
+          html += renderLogItem(p, false);
+          children.forEach(c => {
+             html += renderLogItem(c, true, true);
+          });
+          html += '</div>';
+        } else {
+          html += renderLogItem(mixed.item, true);
+        }
+      });
+      container.innerHTML = html;
+      return;
+    }
   }
 
   if (groupSame) {
