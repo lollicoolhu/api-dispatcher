@@ -1177,11 +1177,14 @@ function openOverrideVersionModal(path, versions) {
   versionListHtml += '</div>';
   
   // 插入版本列表（容错：editor 可能为空）
-  const editorParent = editor ? editor.parentElement : document.getElementById('modalBody') || modal;
-  if (editorParent) {
-    const old = document.getElementById('versionListContainer');
-    if (old) old.remove();
-    editorParent.insertAdjacentHTML('afterbegin', '<div id="versionListContainer">' + versionListHtml + '</div>');
+  // 先移除旧的版本列表容器
+  const old = document.getElementById('versionListContainer');
+  if (old) old.remove();
+  
+  // 使用 modal-body 作为父容器，而不是依赖 editor.parentElement
+  const modalBody = modal.querySelector('.modal-body');
+  if (modalBody) {
+    modalBody.insertAdjacentHTML('afterbegin', '<div id="versionListContainer">' + versionListHtml + '</div>');
   }
   
   // 修改底部按钮
@@ -1220,13 +1223,16 @@ async function deleteOverrideVersionInModal(path, versionId) {
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
   await loadOverrides();
   
-  // 如果还有版本，直接在当前弹窗内刷新列表（不关闭弹窗）
+  // 如果还有版本，刷新版本列表（不关闭弹窗）
   const versions = overrides[path] || [];
   if (versions.length > 0) {
+    // 移除旧的版本列表容器
     const container = document.getElementById('versionListContainer');
     if (container) container.remove();
+    // 重新打开版本管理弹窗
     openOverrideVersionModal(path, versions);
   } else {
+    // 如果没有版本了，关闭弹窗
     closeOverrideVersionModal();
   }
 }
