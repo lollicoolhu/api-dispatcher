@@ -787,10 +787,11 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
       folderDiv.style.display = 'flex';
       const folderSelect = document.getElementById('modalFolderSelect');
       if (folderSelect) {
-        folderSelect.innerHTML = publicFolders.map(f => {
+        let optionsHtml = publicFolders.map(f => {
           const name = f.path.replace(/^public\//, '');
           return '<option value="' + name + '">' + name + '</option>';
-        }).join('') + '<option value="__new__">+ 新建文件夹...</option>';
+        }).join('');
+        folderSelect.innerHTML = '<option value="">默认 (public/mock)</option>' + optionsHtml + '<option value="__new__">+ 新建文件夹...</option>';
       }
     } else {
       folderDiv.style.display = 'none';
@@ -2654,6 +2655,7 @@ function handleLogBatchFolderChange() {
     // 打开新建文件夹模态框
     document.getElementById('newFolderName').value = '';
     document.getElementById('newFolderModal').classList.add('active');
+    window.newFolderTarget = 'logBatchFolder';
   }
 }
 
@@ -2691,13 +2693,11 @@ async function createNewFolder() {
     return;
   }
   
-  // 创建一个临时文件来创建文件夹
-  const tempFile = folderPath + '/.gitkeep';
   try {
-    const res = await fetch('/admin/har/save', {
+    const res = await fetch('/admin/folder/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [tempFile]: '' })
+      body: JSON.stringify({ name: folderName })
     });
     const result = await res.json();
     if (result.success) {
