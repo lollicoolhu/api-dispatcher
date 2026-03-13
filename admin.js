@@ -1,6 +1,6 @@
 // 状态变量
 let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
-let logs = [], expandedLogGroups = new Set(), activeLogIdx = null, logDetailTab = 'response', logRefreshTimer = null;
+let logs = [], expandedLogGroups = new Set(), activeLogId = null, logDetailTab = 'response', logRefreshTimer = null;
 let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folderMappings = {}, localFolders = {}, globalServers = {}, currentParseFolder = '';
 let modalCallback = null, mappingTestTab = 'response';
 let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
@@ -489,7 +489,7 @@ async function saveMappingFromModal() {
   renderOverrides();
   renderFolderMappings();
   closeMappingModal();
-  if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+  if (activeLogId !== null) showLogDetail(activeLogId);
 }
 
 async function testMapping() {
@@ -861,6 +861,8 @@ function closeModal() {
   document.getElementById('jsonModal').classList.remove('active');
   modalCallback = null;
   currentModalPath = '';
+  // 由于 modal 是单例，重置所有版本管理相关的 UI 状态
+  resetOverrideVersionModalView();
 }
 
 function formatJson() {
@@ -924,7 +926,7 @@ async function savePermanentFromModal() {
   if (result.success) {
     alert('永久保存成功');
     closeModal();
-    if (activeLogIdx !== null) refreshLogs();
+    if (activeLogId !== null) refreshLogs();
   } else {
     alert('保存失败: ' + result.error);
   }
@@ -940,7 +942,7 @@ async function deleteFileFromModal() {
   if (result.success) {
     alert('删除成功');
     closeModal();
-    if (activeLogIdx !== null) refreshLogs();
+    if (activeLogId !== null) refreshLogs();
   } else {
     alert('删除失败: ' + result.error);
   }
@@ -1369,7 +1371,7 @@ function createNewOverrideVersion(path) {
     const remark = document.getElementById('modalRemark').value.trim();
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
     await loadOverrides();
-    if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+    if (activeLogId !== null) showLogDetail(activeLogId);
   }, false, true, enabledVersion ? (enabledVersion.priority ?? 1) : 1, enabledVersion ? (enabledVersion.remark || '') : '');
   
   // 在编辑区域上方的色带中显示“正在新建版本”，以及可选的基准版本备注
@@ -1391,15 +1393,9 @@ function createNewOverrideVersion(path) {
 async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false) {
   const versions = overrides[path] || [];
   
-  // 如果有多个版本，显示版本管理弹窗
-  if (versions.length > 1) {
+  // 如果有已有版本，显示版本管理弹窗（即使只有1个，也让用能看到版本信息并选择新建）
+  if (versions.length > 0) {
     openOverrideVersionModal(path, versions);
-    return;
-  }
-  
-  // 如果只有一个版本，直接编辑
-  if (versions.length === 1) {
-    editOverrideVersion(path, versions[0].id, forceContent ? originalContent : undefined);
     return;
   }
   
@@ -1421,7 +1417,7 @@ async function setTempOverride(path, originalContent, showFileActions = false, f
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
     await loadOverrides();
     
-    if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+    if (activeLogId !== null) showLogDetail(activeLogId);
   }, showFileActions, true, currentPriority, currentRemark);
 }
 
@@ -1571,8 +1567,8 @@ function renderResponseContent(body, headers, id, isBase64) {
 }
 
 // 下载响应内容
-function downloadResponseContent(logIdx) {
-  const l = logs[logIdx];
+function downloadResponseContent(logId) {
+  const l = logs.find(log => log.id === logId);
   if (!l) return;
   const body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
   const contentType = l.mappingResponse ? 
@@ -1599,8 +1595,8 @@ function downloadResponseContent(logIdx) {
 }
 
 // 复制响应内容
-function copyResponseContent(logIdx, event) {
-  const l = logs[logIdx];
+function copyResponseContent(logId, event) {
+  const l = logs.find(log => log.id === logId);
   if (!l) return;
   
   let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
@@ -1760,13 +1756,33 @@ async function refreshLogs() {
   logs = await res.json();
   document.getElementById('logCount').textContent = logs.length;
   renderLogs();
+  
+  // 如果当前有选中的日志，且它还在列表中，则刷新详情板内容
+  if (activeLogId !== null) {
+      const exists = logs.some(l => l.id === activeLogId);
+      if (exists) {
+          // 仅重新填充详情板，不通过 showLogDetail 触发 renderLogs 循环
+          updateLogDetailContent(activeLogId);
+      } else {
+          activeLogId = null;
+          document.getElementById('logDetailPanel').classList.remove('active');
+      }
+  }
+}
+
+// 辅助函数：仅更新详情板内容，不触发重渲染列表
+function updateLogDetailContent(logId) {
+    const l = logs.find(log => log.id === logId);
+    if (!l) return;
+    // 这里我们实际上可以共用 showLogDetail 的逻辑，但为了避免某些 UI 跳动，我们可以提取它
+    showLogDetail(logId); 
 }
 
 async function clearLogs() {
   const confirmed = await showConfirm('确定清空所有日志?', '清空日志', '清空');
   if (!confirmed) return;
   await fetch('/admin/logs', { method: 'DELETE' });
-  activeLogIdx = null;
+  activeLogId = null;
   document.getElementById('logDetailPanel').classList.remove('active');
   refreshLogs();
 }
@@ -1775,7 +1791,7 @@ function renderLogs() {
   const statusFilter = document.getElementById('logStatusFilter').value;
   const groupSame = document.getElementById('logGroupSame').checked;
   const groupByParent = document.getElementById('logGroupByParent').checked;
-  let filtered = logs.map((l, i) => ({ ...l, idx: i })).filter(l => {
+  let filtered = logs.filter(l => {
     if (search && !l.path.toLowerCase().includes(search)) return false;
     if (statusFilter === 'found' && l.found !== true) return false;
     if (statusFilter === 'mapping' && l.found !== 'mapping') return false;
@@ -1870,7 +1886,7 @@ function renderLogs() {
     const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
     const folderTag = l.matchedFolder && l.found === true ? '<span class="folder-tag">' + escapeHtml(l.matchedFolder) + '</span>' : '';
     
-    return '<div class="log-item' + (isChild ? ' child-item' : '') + (activeLogIdx === l.idx ? ' active' : '') + ' ' + outcomeInfo.class + '" onclick="showLogDetail(' + l.idx + ')">' +
+    return '<div class="log-item' + (isChild ? ' child-item' : '') + (activeLogId === l.id ? ' active' : '') + ' ' + outcomeInfo.class + '" onclick="showLogDetail(\'' + l.id + '\')">' +
       '<span class="log-time">' + formatTime(l.time) + '</span>' +
       '<span class="method method-' + method + '">' + method + '</span>' +
       (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
@@ -1972,7 +1988,7 @@ function renderLogs() {
         pageSessions.forEach(session => {
           const p = session.parent;
           const children = session.children;
-          const innerKey = 'session:' + p.idx;
+          const innerKey = 'session:' + p.id;
           const expandedInner = expandedLogGroups.has(innerKey);
           
           const innerMethod = p.method || 'GET';
@@ -2045,7 +2061,7 @@ function renderLogs() {
           const session = mixed.item;
           const p = session.parent;
           const children = session.children;
-          const innerKey = 'session:' + p.idx;
+          const innerKey = 'session:' + p.id;
           const expandedInner = expandedLogGroups.has(innerKey);
           
           const innerMethod = p.method || 'GET';
@@ -2123,18 +2139,19 @@ function toggleLogGroup(path) {
 
 function switchLogDetailTab(tab) {
   logDetailTab = tab;
-  if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+  if (activeLogId !== null) showLogDetail(activeLogId);
 }
 
 let logHeadersCollapsed = { req: false, res: true };
 function toggleLogHeaders(type) {
   logHeadersCollapsed[type] = !logHeadersCollapsed[type];
-  if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+  if (activeLogId !== null) showLogDetail(activeLogId);
 }
 
-function showLogDetail(idx) {
-  activeLogIdx = idx;
-  const l = logs[idx];
+function showLogDetail(logId) {
+  activeLogId = logId;
+  const l = logs.find(log => log.id === logId);
+  if (!l) return;
   const panel = document.getElementById('logDetailPanel');
   const tabBtn = (name, label) => '<button class="detail-tab' + (logDetailTab === name ? ' active' : '') + '" onclick="switchLogDetailTab(\'' + name + '\')">' + label + '</button>';
   const headerTable = (headers) => {
@@ -2172,7 +2189,7 @@ function showLogDetail(idx) {
     const hasReqBody = l.body && l.body.length > 0;
     
     // 根据 content-type 判断是否可展示
-    const responseContentHtml = renderResponseContent(mr.body, mr.headers, idx, mr.isBase64);
+    const responseContentHtml = renderResponseContent(mr.body, mr.headers, logId, mr.isBase64);
     
     const accessTabHtml = 
       '<div class="section-title">Response <span class="section-tag">来自映射服务器</span></div>' +
@@ -2216,7 +2233,7 @@ function showLogDetail(idx) {
       (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">本地: ' + l.path + '</div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
-      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', ' + idx + ')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', false, ' + idx + ')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
+      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', false, \'' + logId + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
       '<div class="detail-tabs">' + tabBtn('access', '访问请求') + tabBtn('proxy', '映射请求') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'access' || logDetailTab === 'response' || logDetailTab === 'request' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'proxy' ? ' active' : '') + '">' + proxyTabHtml + '</div>' +
@@ -2236,12 +2253,13 @@ function showLogDetail(idx) {
     r.headers.forEach((v, k) => resHeaders[k] = v);
     return r.text().then(text => ({ text, resHeaders }));
   }).then(({ text, resHeaders }) => {
+    if (activeLogId !== l.id) return; // 防止异步跳格
     let responseBody;
     try { responseBody = JSON.stringify(JSON.parse(text), null, 2); } catch { responseBody = text; }
     const respContent = document.getElementById('logResponseContent');
     if (respContent) {
       respContent.innerHTML = '<div style="position:relative">' +
-        '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(' + idx + ', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
+        '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(\'' + logId + '\', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
         '<pre>' + escapeHtml(responseBody) + '</pre>' +
         '</div>';
     }
@@ -2284,8 +2302,8 @@ function showLogDetail(idx) {
     (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
     '<div style="margin-bottom:10px">' + 
-    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', ' + idx + ')">创建文件</button> ' : '') + 
-    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ', ' + idx + ')">修改返回</button> ' +
+    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">创建文件</button> ' : '') + 
+    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ', \'' + logId + '\')">修改返回</button> ' +
     '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
     (logHasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
     (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + 
@@ -2300,18 +2318,20 @@ function showLogDetail(idx) {
 
 async function removeMappingAndRefreshLog(apiPath) {
   await removeMapping(apiPath);
-  showLogDetail(activeLogIdx);
+  showLogDetail(activeLogId);
 }
 
-function createMissingFile(apiPath, logIdx) {
+function createMissingFile(apiPath, logId) {
   let initialContent = JSON.stringify({ Outcome: "Success", Message: "Success", Data: {} }, null, 2);
   
-  if (logIdx !== undefined && logs[logIdx]) {
-    const l = logs[logIdx];
-    let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
-    if (body !== undefined && body !== null && body !== '') {
-      try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
-      initialContent = body;
+  if (logId !== undefined) {
+    const l = logs.find(log => log.id === logId);
+    if (l) {
+      let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+      if (body !== undefined && body !== null && body !== '') {
+        try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
+        initialContent = body;
+      }
     }
   }
 
@@ -2356,15 +2376,17 @@ async function deleteLocalFileFromLog(apiPath) {
   else alert('删除失败: ' + result.error);
 }
 
-function editLogOverride(path, isLocalFile = false, logIdx) {
+function editLogOverride(path, isLocalFile = false, logId) {
   let initialContent = window.currentLogResponse || '{}';
   let force = false;
-  if (logIdx !== undefined && logs[logIdx]) {
-    const l = logs[logIdx];
-    let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
-    if (body !== undefined && body !== null && body !== '') {
-      initialContent = body;
-      force = true;
+  if (logId !== undefined) {
+    const l = logs.find(log => log.id === logId);
+    if (l) {
+      let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+      if (body !== undefined && body !== null && body !== '') {
+        initialContent = body;
+        force = true;
+      }
     }
   }
   setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force); }, 100);
@@ -2372,7 +2394,7 @@ function editLogOverride(path, isLocalFile = false, logIdx) {
 
 async function removeOverrideAndRefreshLog(path) {
   await removeOverride(path);
-  showLogDetail(activeLogIdx);
+  showLogDetail(activeLogId);
 }
 
 
