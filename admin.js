@@ -455,7 +455,7 @@ async function updateMappingPriority(apiPath, priority) {
 
 async function removeMapping(apiPath) {
   await fetch('/admin/mappings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath }) });
-  loadMappings();
+  await loadMappings();
 }
 
 function openMappingModal(apiPath) {
@@ -1094,12 +1094,12 @@ async function removeOverride(path) {
   const confirmed = await showConfirm('确定删除该接口的所有临时修改版本？', '删除确认', '删除');
   if (!confirmed) return;
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-  loadOverrides();
+  await loadOverrides();
 }
 
 async function removeOverrideVersion(path, versionId) {
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
-  loadOverrides();
+  await loadOverrides();
 }
 
 async function editOverride(path) {
@@ -1309,13 +1309,13 @@ async function deleteOverrideVersion(path, versionId) {
   }
 }
 
-function editOverrideVersion(path, versionId) {
+function editOverrideVersion(path, versionId, forcedContent = undefined) {
   const versions = overrides[path] || [];
   const version = versions.find(v => v.id === versionId);
   if (!version) return;
   const versionIndex = versions.findIndex(v => v.id === versionId);
   
-  let content = version.content || '{}';
+  let content = forcedContent !== undefined ? forcedContent : (version.content || '{}');
   const currentPriority = version.priority ?? 1;
   const currentRemark = version.remark || '';
   
@@ -1387,7 +1387,7 @@ function createNewOverrideVersion(path) {
   }
 }
 
-async function setTempOverride(path, originalContent, showFileActions = false) {
+async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false) {
   const versions = overrides[path] || [];
   
   // 如果有多个版本，显示版本管理弹窗
@@ -1398,15 +1398,15 @@ async function setTempOverride(path, originalContent, showFileActions = false) {
   
   // 如果只有一个版本，直接编辑
   if (versions.length === 1) {
-    editOverrideVersion(path, versions[0].id);
+    editOverrideVersion(path, versions[0].id, forceContent ? originalContent : undefined);
     return;
   }
   
   // 如果没有版本，创建新版本
   const enabledVersion = versions.find(v => v.enabled);
   
-  // 使用启用的版本内容，如果没有则使用原始内容
-  let content = enabledVersion ? enabledVersion.content : originalContent;
+  // 使用启用的版本内容，如果有forceContent则强制使用新内容
+  let content = (enabledVersion && !forceContent) ? enabledVersion.content : originalContent;
   const currentPriority = enabledVersion ? (enabledVersion.priority ?? 1) : 1;
   const currentRemark = enabledVersion ? (enabledVersion.remark || '') : '';
   
@@ -2215,7 +2215,7 @@ function showLogDetail(idx) {
       (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">本地: ' + l.path + '</div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
-      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', ' + idx + ')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
+      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', ' + idx + ')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', false, ' + idx + ')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
       '<div class="detail-tabs">' + tabBtn('access', '访问请求') + tabBtn('proxy', '映射请求') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'access' || logDetailTab === 'response' || logDetailTab === 'request' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'proxy' ? ' active' : '') + '">' + proxyTabHtml + '</div>' +
@@ -2284,7 +2284,7 @@ function showLogDetail(idx) {
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
     '<div style="margin-bottom:10px">' + 
     (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', ' + idx + ')">创建文件</button> ' : '') + 
-    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ')">修改返回</button> ' +
+    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ', ' + idx + ')">修改返回</button> ' +
     '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
     (logHasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
     (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + 
@@ -2355,8 +2355,18 @@ async function deleteLocalFileFromLog(apiPath) {
   else alert('删除失败: ' + result.error);
 }
 
-function editLogOverride(path, isLocalFile = false) {
-  setTimeout(() => { setTempOverride(path, window.currentLogResponse || '{}', isLocalFile); }, 100);
+function editLogOverride(path, isLocalFile = false, logIdx) {
+  let initialContent = window.currentLogResponse || '{}';
+  let force = false;
+  if (logIdx !== undefined && logs[logIdx]) {
+    const l = logs[logIdx];
+    let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+    if (body !== undefined && body !== null && body !== '') {
+      initialContent = body;
+      force = true;
+    }
+  }
+  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force); }, 100);
 }
 
 async function removeOverrideAndRefreshLog(path) {
