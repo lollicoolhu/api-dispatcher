@@ -1,10 +1,11 @@
 // 状态变量
 let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
-let logs = [], expandedLogGroups = new Set(), activeLogIdx = null, logDetailTab = 'response', logRefreshTimer = null;
+let logs = [], expandedLogGroups = new Set(), activeLogId = null, logDetailTab = 'response', logRefreshTimer = null;
 let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folderMappings = {}, localFolders = {}, globalServers = {}, currentParseFolder = '';
 let modalCallback = null, mappingTestTab = 'response';
 let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
 let publicFolders = [];
+let masterConfig = { externalFolderPath: '' };
 
 // 辅助函数：获取路径的启用版本
 function getEnabledOverride(path) {
@@ -41,10 +42,45 @@ Promise.all([
   renderFolderMappings();
 });
 loadCookieRewrite();
+loadMasterConfig();
 
-// 加载 public 文件夹列表
+async function loadMasterConfig() {
+  const res = await fetch('/admin/master-config');
+  const data = await res.json();
+  masterConfig = data;
+  document.getElementById('currentDataRootDisplay').textContent = data.effectiveDataRoot;
+}
+
+// ========== 数据目录选择器 (系统级) ==========
+async function selectSystemFolder() {
+  const res = await fetch('/admin/system/select-folder', { method: 'POST' });
+  const result = await res.json();
+  
+  if (result.success && result.path) {
+    if (confirm('确定将存储目录切换至：\n' + result.path + ' ?')) {
+      const saveRes = await fetch('/admin/master-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ externalFolderPath: result.path })
+      });
+      const saveResult = await saveRes.json();
+      if (saveResult.success) {
+        alert('存储目录已切换');
+        location.reload();
+      } else {
+        alert('切换失败: ' + saveResult.error);
+      }
+    }
+  } else if (result.error) {
+    if (result.error !== '用户取消选择或发生系统错误') {
+      alert('选择失败: ' + result.error);
+    }
+  }
+}
+
+// 加载文件夹列表
 async function loadPublicFolders(currentFolder) {
-  const res = await fetch('/admin/public-folders');
+  const res = await fetch('/admin/folders');
   const data = await res.json();
   publicFolders = data.folders || [];
   
@@ -55,7 +91,7 @@ async function loadPublicFolders(currentFolder) {
       '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
     ).join('');
     if (publicFolders.length === 0) {
-      harSelect.innerHTML = '<option value="public/mock">mock</option>';
+      harSelect.innerHTML = '<option value="mock">mock</option>';
     }
   }
   
@@ -198,7 +234,7 @@ function startAutoRefresh() {
   if (logRefreshTimer) return;
   if (document.getElementById('logAutoRefresh').checked) {
     const interval = parseInt(document.getElementById('logRefreshInterval').value) || 1000;
-    logRefreshTimer = setInterval(refreshLogs, interval);
+    logRefreshTimer = setInterval(() => refreshLogs(true), interval);
   }
 }
 function stopAutoRefresh() {
@@ -455,7 +491,7 @@ async function updateMappingPriority(apiPath, priority) {
 
 async function removeMapping(apiPath) {
   await fetch('/admin/mappings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath }) });
-  loadMappings();
+  await loadMappings();
 }
 
 function openMappingModal(apiPath) {
@@ -489,7 +525,7 @@ async function saveMappingFromModal() {
   renderOverrides();
   renderFolderMappings();
   closeMappingModal();
-  if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+  if (activeLogId !== null) showLogDetail(activeLogId);
 }
 
 async function testMapping() {
@@ -556,7 +592,7 @@ function switchMappingTestTab(tab) {
 // ========== 文件夹映射管理 ==========
 async function loadFolderMappings(autoRender = true) {
   // 先刷新文件夹列表，确保 publicFolders 是最新的
-  const folderRes = await fetch('/admin/public-folders');
+  const folderRes = await fetch('/admin/folders');
   const folderData = await folderRes.json();
   publicFolders = folderData.folders || [];
   
@@ -762,7 +798,7 @@ function confirmResolve(result) {
 // ========== JSON Editor Modal ==========
 let currentModalPath = '';
 
-function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '') {
+function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '') {
   const titleEl = document.getElementById('modalTitle');
   const pathEl = document.getElementById('modalPath');
   const editorEl = document.getElementById('jsonEditor');
@@ -780,6 +816,24 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
   if (permanentBtn) permanentBtn.style.display = showFileActions ? 'inline-block' : 'none';
   if (deleteBtn) deleteBtn.style.display = showFileActions ? 'inline-block' : 'none';
   
+  // 显示/隐藏文件夹选择
+  const folderDiv = document.getElementById('modalFolderDiv');
+  if (folderDiv) {
+    if (showFolderSelect) {
+      folderDiv.style.display = 'flex';
+      const folderSelect = document.getElementById('modalFolderSelect');
+      if (folderSelect) {
+        let optionsHtml = publicFolders.map(f => {
+          const name = f.path.replace(/^public\//, '');
+          return '<option value="' + name + '">' + name + '</option>';
+        }).join('');
+        folderSelect.innerHTML = '<option value="mock">mock</option>' + optionsHtml + '<option value="__new__">+ 新建文件夹...</option>';
+      }
+    } else {
+      folderDiv.style.display = 'none';
+    }
+  }
+
   // 显示/隐藏优先级输入
   const priorityDiv = document.getElementById('modalPriorityDiv');
   const priorityInput = document.getElementById('modalPriority');
@@ -809,12 +863,19 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
     modal.classList.add('active');
     const footer = modal.querySelector('.modal-footer');
     if (footer) {
+      const finalSaveText = saveBtnText || (showFolderSelect ? '保存' : '临时保存');
       footer.innerHTML =
         '<button class="btn btn-danger" id="modalDeleteBtn" style="display:none" onclick="deleteFileFromModal()">删除文件</button>' +
         '<button class="btn btn-success" id="modalPermanentBtn" style="display:none" onclick="savePermanentFromModal()">永久保存</button>' +
         '<button class="btn btn-secondary" onclick="formatJson()">格式化</button>' +
         '<button class="btn btn-secondary" onclick="closeModal()">取消</button>' +
-        '<button class="btn btn-primary" id="modalSaveBtn">临时保存</button>';
+        '<button class="btn btn-primary" id="modalSaveBtn">' + finalSaveText + '</button>';
+      
+      const newDeleteBtn = document.getElementById('modalDeleteBtn');
+      const newPermanentBtn = document.getElementById('modalPermanentBtn');
+      if (newDeleteBtn) newDeleteBtn.style.display = showFileActions ? 'inline-block' : 'none';
+      if (newPermanentBtn) newPermanentBtn.style.display = showFileActions ? 'inline-block' : 'none';
+
       const saveBtn = document.getElementById('modalSaveBtn');
       if (saveBtn) {
         saveBtn.onclick = handleModalSaveClick;
@@ -823,10 +884,21 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
   }
 }
 
+function handleModalFolderChange() {
+  const select = document.getElementById('modalFolderSelect');
+  if (select && select.value === '__new__') {
+    document.getElementById('newFolderName').value = '';
+    document.getElementById('newFolderModal').classList.add('active');
+    window.newFolderTarget = 'modalFolderSelect';
+  }
+}
+
 function closeModal() {
   document.getElementById('jsonModal').classList.remove('active');
   modalCallback = null;
   currentModalPath = '';
+  // 由于 modal 是单例，重置所有版本管理相关的 UI 状态
+  resetOverrideVersionModalView();
 }
 
 function formatJson() {
@@ -890,7 +962,7 @@ async function savePermanentFromModal() {
   if (result.success) {
     alert('永久保存成功');
     closeModal();
-    if (activeLogIdx !== null) refreshLogs();
+    if (activeLogId !== null) refreshLogs();
   } else {
     alert('保存失败: ' + result.error);
   }
@@ -906,7 +978,7 @@ async function deleteFileFromModal() {
   if (result.success) {
     alert('删除成功');
     closeModal();
-    if (activeLogIdx !== null) refreshLogs();
+    if (activeLogId !== null) refreshLogs();
   } else {
     alert('删除失败: ' + result.error);
   }
@@ -1061,12 +1133,12 @@ async function removeOverride(path) {
   const confirmed = await showConfirm('确定删除该接口的所有临时修改版本？', '删除确认', '删除');
   if (!confirmed) return;
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-  loadOverrides();
+  await loadOverrides();
 }
 
 async function removeOverrideVersion(path, versionId) {
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
-  loadOverrides();
+  await loadOverrides();
 }
 
 async function editOverride(path) {
@@ -1282,13 +1354,13 @@ async function deleteOverrideVersion(path, versionId) {
   }
 }
 
-function editOverrideVersion(path, versionId) {
+function editOverrideVersion(path, versionId, forcedContent = undefined) {
   const versions = overrides[path] || [];
   const version = versions.find(v => v.id === versionId);
   if (!version) return;
   const versionIndex = versions.findIndex(v => v.id === versionId);
   
-  let content = version.content || '{}';
+  let content = forcedContent !== undefined ? forcedContent : (version.content || '{}');
   const currentPriority = version.priority ?? 1;
   const currentRemark = version.remark || '';
   
@@ -1341,7 +1413,7 @@ function createNewOverrideVersion(path) {
     const remark = document.getElementById('modalRemark').value.trim();
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
     await loadOverrides();
-    if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+    if (activeLogId !== null) showLogDetail(activeLogId);
   }, false, true, enabledVersion ? (enabledVersion.priority ?? 1) : 1, enabledVersion ? (enabledVersion.remark || '') : '');
   
   // 在编辑区域上方的色带中显示“正在新建版本”，以及可选的基准版本备注
@@ -1360,26 +1432,20 @@ function createNewOverrideVersion(path) {
   }
 }
 
-async function setTempOverride(path, originalContent, showFileActions = false) {
+async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false) {
   const versions = overrides[path] || [];
   
-  // 如果有多个版本，显示版本管理弹窗
-  if (versions.length > 1) {
+  // 如果有已有版本，显示版本管理弹窗（即使只有1个，也让用能看到版本信息并选择新建）
+  if (versions.length > 0) {
     openOverrideVersionModal(path, versions);
-    return;
-  }
-  
-  // 如果只有一个版本，直接编辑
-  if (versions.length === 1) {
-    editOverrideVersion(path, versions[0].id);
     return;
   }
   
   // 如果没有版本，创建新版本
   const enabledVersion = versions.find(v => v.enabled);
   
-  // 使用启用的版本内容，如果没有则使用原始内容
-  let content = enabledVersion ? enabledVersion.content : originalContent;
+  // 使用启用的版本内容，如果有forceContent则强制使用新内容
+  let content = (enabledVersion && !forceContent) ? enabledVersion.content : originalContent;
   const currentPriority = enabledVersion ? (enabledVersion.priority ?? 1) : 1;
   const currentRemark = enabledVersion ? (enabledVersion.remark || '') : '';
   
@@ -1393,7 +1459,7 @@ async function setTempOverride(path, originalContent, showFileActions = false) {
     await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
     await loadOverrides();
     
-    if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+    if (activeLogId !== null) showLogDetail(activeLogId);
   }, showFileActions, true, currentPriority, currentRemark);
 }
 
@@ -1543,8 +1609,8 @@ function renderResponseContent(body, headers, id, isBase64) {
 }
 
 // 下载响应内容
-function downloadResponseContent(logIdx) {
-  const l = logs[logIdx];
+function downloadResponseContent(logId) {
+  const l = logs.find(log => log.id === logId);
   if (!l) return;
   const body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
   const contentType = l.mappingResponse ? 
@@ -1571,8 +1637,8 @@ function downloadResponseContent(logIdx) {
 }
 
 // 复制响应内容
-function copyResponseContent(logIdx, event) {
-  const l = logs[logIdx];
+function copyResponseContent(logId, event) {
+  const l = logs.find(log => log.id === logId);
   if (!l) return;
   
   let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
@@ -1680,7 +1746,7 @@ function renderPageInfo(pageHeader) {
   const info = parsePageInfo(pageHeader);
   if (!info) return '<em>无页面信息</em>';
   
-  console.log('Parsed page info:', info); // 调试信息
+
   
   let html = '<div style="margin-bottom:12px"><strong>Activity</strong></div>';
   html += '<div class="detail-content" style="padding:10px;margin-bottom:15px;background:#e3f2fd;border-left:3px solid #2196f3"><span style="color:#1976d2;font-weight:bold;font-size:14px">' + escapeHtml(info.activity) + '</span></div>';
@@ -1692,8 +1758,6 @@ function renderPageInfo(pageHeader) {
     info.fragments.forEach((f, idx) => {
       // 根据层级深度设置左边距
       const marginLeft = f.depth * 24;
-      
-      console.log('Fragment:', f.name, 'depth:', f.depth, 'marginLeft:', marginLeft, 'visible:', f.visible); // 调试信息
       
       // 可见状态样式
       const bgColor = f.visible ? '#e8f5e9' : '#f5f5f5';
@@ -1727,28 +1791,49 @@ function renderPageInfo(pageHeader) {
 
 
 // ========== 访问日志 ==========
-async function refreshLogs() {
+async function refreshLogs(skipDetail = false) {
   const res = await fetch('/admin/logs');
   logs = await res.json();
   document.getElementById('logCount').textContent = logs.length;
   renderLogs();
+  
+  // 如果当前有选中的日志，且它还在列表中，则决定是否刷新详情板内容
+  if (activeLogId !== null) {
+      const exists = logs.some(l => l.id === activeLogId);
+      if (exists) {
+          // 如果 skipDetail 为 true (自动刷新时)，则仅维持列表选中态，不刷新详情板避免闪烁或重置视图
+          if (!skipDetail) {
+              updateLogDetailContent(activeLogId);
+          }
+      } else {
+          activeLogId = null;
+          document.getElementById('logDetailPanel').classList.remove('active');
+      }
+  }
+}
+
+// 辅助函数：仅更新详情板内容，不触发重渲染列表
+function updateLogDetailContent(logId) {
+    const l = logs.find(log => log.id === logId);
+    if (!l) return;
+    // 这里我们实际上可以共用 showLogDetail 的逻辑，但为了避免某些 UI 跳动，我们可以提取它
+    showLogDetail(logId); 
 }
 
 async function clearLogs() {
   const confirmed = await showConfirm('确定清空所有日志?', '清空日志', '清空');
   if (!confirmed) return;
   await fetch('/admin/logs', { method: 'DELETE' });
-  activeLogIdx = null;
+  activeLogId = null;
   document.getElementById('logDetailPanel').classList.remove('active');
   refreshLogs();
 }
-
 function renderLogs() {
   const search = document.getElementById('logSearch').value.toLowerCase();
   const statusFilter = document.getElementById('logStatusFilter').value;
   const groupSame = document.getElementById('logGroupSame').checked;
   const groupByParent = document.getElementById('logGroupByParent').checked;
-  let filtered = logs.map((l, i) => ({ ...l, idx: i })).filter(l => {
+  let filtered = logs.filter(l => {
     if (search && !l.path.toLowerCase().includes(search)) return false;
     if (statusFilter === 'found' && l.found !== true) return false;
     if (statusFilter === 'mapping' && l.found !== 'mapping') return false;
@@ -1843,7 +1928,7 @@ function renderLogs() {
     const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
     const folderTag = l.matchedFolder && l.found === true ? '<span class="folder-tag">' + escapeHtml(l.matchedFolder) + '</span>' : '';
     
-    return '<div class="log-item' + (isChild ? ' child-item' : '') + (activeLogIdx === l.idx ? ' active' : '') + ' ' + outcomeInfo.class + '" onclick="showLogDetail(' + l.idx + ')">' +
+    return '<div class="log-item' + (isChild ? ' child-item' : '') + (activeLogId === l.id ? ' active' : '') + ' ' + outcomeInfo.class + '" onclick="showLogDetail(\'' + l.id + '\')">' +
       '<span class="log-time">' + formatTime(l.time) + '</span>' +
       '<span class="method method-' + method + '">' + method + '</span>' +
       (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
@@ -1854,61 +1939,205 @@ function renderLogs() {
       '</div>';
   };
 
-  // 按父请求分组（HTML页面及其资源）
+  // 按页面分组的基础数据结构：找出所有 HTML 页面作为 Session，将相关子资源关联进去
   if (groupByParent) {
-    // 找出所有 HTML 请求作为父请求
-    const parentLogs = [];
-    const childrenMap = {}; // parentPath -> children[]
+    const sessions = []; // 存放所有 HTML 页面的 Session
+    const standaloneLogs = []; // 未归属任何页面的独立请求
     
+    // Pass 1: 找出所有的 HTML 页面请求作为独立 Session
     filtered.forEach(l => {
       const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') || 
                      (l.mappingResponse && l.mappingResponse.headers && 
                       (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
-      
-      if (l.parentPath && !isHtml) {
-        // 有父请求的子资源
-        if (!childrenMap[l.parentPath]) childrenMap[l.parentPath] = [];
-        childrenMap[l.parentPath].push(l);
-      } else {
-        // 父请求或无父请求的独立请求
-        parentLogs.push(l);
+      if (isHtml) {
+        sessions.push({ parent: l, children: [] });
       }
     });
     
-    let html = '';
-    parentLogs.forEach(l => {
-      const children = childrenMap[l.path] || [];
-      const hasChildren = children.length > 0;
-      const expanded = expandedLogGroups.has('parent:' + l.idx);
-      const fileType = getFileTypeTag(l.path);
-      const method = l.method || 'GET';
-      const respCode = getResponseCode(l);
-      const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+    // Pass 2: 为子资源匹配最近的 HTML Session
+    filtered.forEach(l => {
+      const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') || 
+                     (l.mappingResponse && l.mappingResponse.headers && 
+                      (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
+      if (isHtml) return; // 页面本身已经被处理
       
-      if (hasChildren) {
-        html += '<div class="group-header" onclick="toggleLogGroup(\'parent:' + l.idx + '\')">' +
+      if (l.parentPath) {
+        let found = false;
+        // 寻找时间最早于资源请求前最近的一次 HTML 加载
+        for (let s of sessions) {
+          if (s.parent.path === l.parentPath && s.parent.time <= l.time) {
+            s.children.push(l);
+            found = true;
+            break;
+          }
+        }
+        // 如果异常找不到，且有同名路径（可能跨天或其他原因），归属给第一个找到的
+        if (!found) {
+          for (let s of sessions) {
+            if (s.parent.path === l.parentPath) {
+              s.children.push(l);
+              found = true;
+              break;
+            }
+          }
+        }
+        if (!found) {
+          standaloneLogs.push(l);
+        }
+      } else {
+        standaloneLogs.push(l);
+      }
+    });
+
+    let html = '';
+
+    // 双重分组：页面独立成组，其他非页面请求按相同接口成组
+    if (groupSame) {
+      const pageGroups = {}; // 页面路径 -> sessions[]
+      sessions.forEach(s => {
+        if (!pageGroups[s.parent.path]) pageGroups[s.parent.path] = [];
+        pageGroups[s.parent.path].push(s);
+      });
+
+      const standaloneGroups = {}; // 独立请求路径 -> logs[]
+      standaloneLogs.forEach(l => {
+        if (!standaloneGroups[l.path]) standaloneGroups[l.path] = [];
+        standaloneGroups[l.path].push(l);
+      });
+
+      // 渲染 HTML 页面折叠组
+      for (const [pagePath, pageSessions] of Object.entries(pageGroups)) {
+        const expandedPage = expandedLogGroups.has('page:' + pagePath);
+        const sessionCount = pageSessions.length;
+        const latestSession = pageSessions[0];
+        const method = latestSession.parent.method || 'GET';
+        const respCode = getResponseCode(latestSession.parent);
+        const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+        const fileType = getFileTypeTag(pagePath);
+        
+        html += '<div class="group-header" onclick="toggleLogGroup(\'page:' + pagePath.replace(/'/g, "\\'") + '\')">' +
+          '<span class="arrow ' + (expandedPage ? 'expanded' : '') + '">▶</span>' +
+          '<span class="method method-' + method + '">' + method + '</span>' +
+          (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
+          '<span class="log-status ' + getStatusClass(latestSession.parent.found) + '">' + getStatusText(latestSession.parent.found) + '</span>' +
+          (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
+          '<span class="path">' + pagePath + '</span>' +
+          '<span class="badge badge-count">' + sessionCount + ' 次会话</span>' +
+          '<span style="color:#666;font-size:11px">' + formatTimeAgo(latestSession.parent.time) + '</span></div>';
+          
+        html += '<div class="group-items ' + (expandedPage ? 'expanded' : '') + '">';
+        
+        pageSessions.forEach(session => {
+          const p = session.parent;
+          const children = session.children;
+          const innerKey = 'session:' + p.id;
+          const expandedInner = expandedLogGroups.has(innerKey);
+          
+          const innerMethod = p.method || 'GET';
+          const innerRespCode = getResponseCode(p);
+          const innerRespClass = innerRespCode >= 200 && innerRespCode < 300 ? 'status-2xx' : innerRespCode >= 400 && innerRespCode < 500 ? 'status-4xx' : innerRespCode >= 500 ? 'status-5xx' : '';
+          const innerFileType = getFileTypeTag(p.path);
+
+          html += '<div class="group-header" onclick="toggleLogGroup(\'' + innerKey.replace(/'/g, "\\'") + '\')">' +
+            '<span class="arrow ' + (expandedInner ? 'expanded' : '') + '">▶</span>' +
+            '<span class="method method-' + innerMethod + '">' + innerMethod + '</span>' +
+            (innerRespCode ? '<span class="status-code ' + innerRespClass + '">' + innerRespCode + '</span>' : '') +
+            '<span class="log-status ' + getStatusClass(p.found) + '">' + getStatusText(p.found) + '</span>' +
+            (innerFileType ? '<span class="file-type-tag">' + innerFileType + '</span>' : '') +
+            '<span class="path">' + p.path + '</span>' +
+            '<span class="badge badge-count">' + children.length + ' 个资源</span>' +
+            '<span style="color:#666;font-size:11px">' + p.time + '</span></div>';
+          
+          html += '<div class="group-items ' + (expandedInner ? 'expanded' : '') + '">';
+          html += renderLogItem(p, false);
+          children.forEach(c => {
+             html += renderLogItem(c, true, true);
+          });
+          html += '</div>';
+        });
+        html += '</div>';
+      }
+
+      // 渲染独立请求折叠组
+      for (const [path, items] of Object.entries(standaloneGroups)) {
+        const expanded = expandedLogGroups.has('standalone:' + path);
+        const latest = items[0];
+        const timeAgo = formatTimeAgo(latest.time);
+        const fileType = getFileTypeTag(path);
+        const method = latest.method || 'GET';
+        const respCode = getResponseCode(latest);
+        const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
+        
+        html += '<div class="group-header" onclick="toggleLogGroup(\'standalone:' + path.replace(/'/g, "\\'") + '\')">' +
           '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
           '<span class="method method-' + method + '">' + method + '</span>' +
           (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
-          '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
+          '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
           (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
-          '<span class="path">' + l.path + '</span>' +
-          '<span class="badge badge-count">' + children.length + '个资源</span>' +
-          '<span style="color:#666;font-size:11px">' + formatTimeAgo(l.time) + '</span></div>';
+          '<span class="path">' + path + '</span>' +
+          '<span class="badge badge-count">' + items.length + '次</span>' +
+          '<span style="color:#666;font-size:11px">' + timeAgo + '</span></div>';
         html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
-        // 父请求本身
-        html += renderLogItem(l, false);
-        // 子资源
-        children.forEach(c => {
-          html += renderLogItem(c, true, true);
+        items.forEach(l => {
+          html += renderLogItem(l, false);
         });
         html += '</div>';
-      } else {
-        html += renderLogItem(l, true);
       }
-    });
-    container.innerHTML = html;
-    return;
+      const scrollPos = container.scrollTop;
+      container.innerHTML = html;
+      container.scrollTop = scrollPos;
+      return;
+    } else {
+      // 仅按页面分组，并且保持时间顺序显示（不按独立路径聚合）
+      const allMixed = [];
+      sessions.forEach(s => allMixed.push({ type: 'session', item: s }));
+      standaloneLogs.forEach(l => allMixed.push({ type: 'log', item: l }));
+      
+      // 根据时间重新排序，确保渲染顺序正确（按最新时间排序）
+      allMixed.sort((a, b) => {
+        const timeA = a.type === 'session' ? a.item.parent.time : a.item.time;
+        const timeB = b.type === 'session' ? b.item.parent.time : b.item.time;
+        return timeA < timeB ? 1 : timeA > timeB ? -1 : 0;
+      });
+
+      allMixed.forEach(mixed => {
+        if (mixed.type === 'session') {
+          const session = mixed.item;
+          const p = session.parent;
+          const children = session.children;
+          const innerKey = 'session:' + p.id;
+          const expandedInner = expandedLogGroups.has(innerKey);
+          
+          const innerMethod = p.method || 'GET';
+          const innerRespCode = getResponseCode(p);
+          const innerRespClass = innerRespCode >= 200 && innerRespCode < 300 ? 'status-2xx' : innerRespCode >= 400 && innerRespCode < 500 ? 'status-4xx' : innerRespCode >= 500 ? 'status-5xx' : '';
+          const innerFileType = getFileTypeTag(p.path);
+
+          html += '<div class="group-header" onclick="toggleLogGroup(\'' + innerKey.replace(/'/g, "\\'") + '\')">' +
+            '<span class="arrow ' + (expandedInner ? 'expanded' : '') + '">▶</span>' +
+            '<span class="method method-' + innerMethod + '">' + innerMethod + '</span>' +
+            (innerRespCode ? '<span class="status-code ' + innerRespClass + '">' + innerRespCode + '</span>' : '') +
+            '<span class="log-status ' + getStatusClass(p.found) + '">' + getStatusText(p.found) + '</span>' +
+            (innerFileType ? '<span class="file-type-tag">' + innerFileType + '</span>' : '') +
+            '<span class="path">' + p.path + '</span>' +
+            '<span class="badge badge-count">' + children.length + ' 个资源</span>' +
+            '<span style="color:#666;font-size:11px">' + p.time + '</span></div>';
+          
+          html += '<div class="group-items ' + (expandedInner ? 'expanded' : '') + '">';
+          html += renderLogItem(p, false);
+          children.forEach(c => {
+             html += renderLogItem(c, true, true);
+          });
+          html += '</div>';
+        } else {
+          html += renderLogItem(mixed.item, true);
+        }
+      });
+      const scrollPos = container.scrollTop;
+      container.innerHTML = html;
+      container.scrollTop = scrollPos;
+      return;
+    }
   }
 
   if (groupSame) {
@@ -1943,9 +2172,13 @@ function renderLogs() {
       });
       html += '</div>';
     }
+    const scrollPos = container.scrollTop;
     container.innerHTML = html;
+    container.scrollTop = scrollPos;
   } else {
+    const scrollPos = container.scrollTop;
     container.innerHTML = filtered.map(l => renderLogItem(l, true)).join('');
+    container.scrollTop = scrollPos;
   }
 }
 
@@ -1956,18 +2189,19 @@ function toggleLogGroup(path) {
 
 function switchLogDetailTab(tab) {
   logDetailTab = tab;
-  if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+  if (activeLogId !== null) showLogDetail(activeLogId);
 }
 
 let logHeadersCollapsed = { req: false, res: true };
 function toggleLogHeaders(type) {
   logHeadersCollapsed[type] = !logHeadersCollapsed[type];
-  if (activeLogIdx !== null) showLogDetail(activeLogIdx);
+  if (activeLogId !== null) showLogDetail(activeLogId);
 }
 
-function showLogDetail(idx) {
-  activeLogIdx = idx;
-  const l = logs[idx];
+function showLogDetail(logId) {
+  activeLogId = logId;
+  const l = logs.find(log => log.id === logId);
+  if (!l) return;
   const panel = document.getElementById('logDetailPanel');
   const tabBtn = (name, label) => '<button class="detail-tab' + (logDetailTab === name ? ' active' : '') + '" onclick="switchLogDetailTab(\'' + name + '\')">' + label + '</button>';
   const headerTable = (headers) => {
@@ -1983,10 +2217,27 @@ function showLogDetail(idx) {
     return '<div style="margin-top:10px"><strong style="cursor:pointer" onclick="toggleLogHeaders(\'' + type + '\')">' + title + ' ' + (collapsed ? '▶' : '▼') + '</strong></div><div class="detail-content" style="' + (collapsed ? 'display:none;' : '') + 'max-height:150px">' + content + '</div>';
   };
 
+  // 状态处理
+  const isMapping = l.found === 'mapping';
+  const mr = l.mappingResponse;
+  const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
+  const hasPage = !!pageHeader;
+
+  // 针对映射日志，确保 Tab 选中态有效 (映射日志没有 'response' tab，只有 'access' 和 'proxy')
+  if (isMapping) {
+      if (logDetailTab === 'response' || logDetailTab === 'request') {
+          logDetailTab = 'access';
+      }
+  } else {
+      // 普通日志转映射日志时，如果选中了 'proxy'，重置回 'response'
+      if (logDetailTab === 'access' || logDetailTab === 'proxy') {
+          logDetailTab = 'response';
+      }
+  }
+
   const logHasOverride = hasOverride(l.path);
   const hasMapping = mappings[l.path] && mappings[l.path].enabled;
   const isMissing = l.found !== true && l.found !== 'mapping';
-  const isMapping = l.found === 'mapping';
   const statusText = l.found === true ? '本地' : l.found === 'mapping' ? '映射' : '404';
   const statusClass = l.found === true ? 'found' : l.found === 'mapping' ? 'mapping' : 'missing';
 
@@ -1996,8 +2247,6 @@ function showLogDetail(idx) {
     let proxyBody = mr.body || '';
     try { proxyBody = JSON.stringify(JSON.parse(proxyBody), null, 2); } catch { }
     const mrStatusClass = mr.status >= 200 && mr.status < 300 ? 'status-2xx' : mr.status >= 400 && mr.status < 500 ? 'status-4xx' : 'status-5xx';
-    const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
-    const hasPage = !!pageHeader;
     
     // 访问请求 Tab（客户端 -> 本地服务器）
     let reqBodyFormatted = l.body || '';
@@ -2005,7 +2254,7 @@ function showLogDetail(idx) {
     const hasReqBody = l.body && l.body.length > 0;
     
     // 根据 content-type 判断是否可展示
-    const responseContentHtml = renderResponseContent(mr.body, mr.headers, idx, mr.isBase64);
+    const responseContentHtml = renderResponseContent(mr.body, mr.headers, logId, mr.isBase64);
     
     const accessTabHtml = 
       '<div class="section-title">Response <span class="section-tag">来自映射服务器</span></div>' +
@@ -2049,9 +2298,9 @@ function showLogDetail(idx) {
       (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">本地: ' + l.path + '</div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
-      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
+      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', false, \'' + logId + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
       '<div class="detail-tabs">' + tabBtn('access', '访问请求') + tabBtn('proxy', '映射请求') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
-      '<div class="tab-content' + (logDetailTab === 'access' || logDetailTab === 'response' || logDetailTab === 'request' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
+      '<div class="tab-content' + (logDetailTab === 'access' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'proxy' ? ' active' : '') + '">' + proxyTabHtml + '</div>' +
       (hasPage ? '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>' : '');
     panel.classList.add('active');
@@ -2060,8 +2309,6 @@ function showLogDetail(idx) {
   }
 
   // 普通请求
-  const pageHeader = l.headers && (l.headers['x-bbae-page'] || l.headers['X-Bbae-Page']);
-  const hasPage = !!pageHeader;
   
   // 异步获取响应内容
   fetch(l.path).then(r => {
@@ -2069,12 +2316,13 @@ function showLogDetail(idx) {
     r.headers.forEach((v, k) => resHeaders[k] = v);
     return r.text().then(text => ({ text, resHeaders }));
   }).then(({ text, resHeaders }) => {
+    if (activeLogId !== l.id) return; // 防止异步跳格
     let responseBody;
     try { responseBody = JSON.stringify(JSON.parse(text), null, 2); } catch { responseBody = text; }
     const respContent = document.getElementById('logResponseContent');
     if (respContent) {
       respContent.innerHTML = '<div style="position:relative">' +
-        '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(' + idx + ', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
+        '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(\'' + logId + '\', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
         '<pre>' + escapeHtml(responseBody) + '</pre>' +
         '</div>';
     }
@@ -2101,6 +2349,7 @@ function showLogDetail(idx) {
     '<div class="detail-content"><table>' +
     '<tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr>' +
     '<tr><td>路径</td><td>' + l.path + '</td></tr>' +
+    (l.actualPath ? '<tr><td>实际文件路径</td><td style="word-break:break-all">' + l.actualPath + '</td></tr>' : '') +
     '<tr><td>完整URL</td><td>' + (l.fullUrl || l.path) + '</td></tr>' +
     '<tr><td>访问时间</td><td>' + l.time + '</td></tr>' +
     '<tr><td>客户端IP</td><td>' + l.ip + '</td></tr>' +
@@ -2117,8 +2366,8 @@ function showLogDetail(idx) {
     (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
     '<div style="margin-bottom:10px">' + 
-    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\')">创建文件</button> ' : '') + 
-    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ')">修改返回</button> ' +
+    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">创建文件</button> ' : '') + 
+    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ', \'' + logId + '\')">修改返回</button> ' +
     '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
     (logHasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
     (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + 
@@ -2133,17 +2382,42 @@ function showLogDetail(idx) {
 
 async function removeMappingAndRefreshLog(apiPath) {
   await removeMapping(apiPath);
-  showLogDetail(activeLogIdx);
+  showLogDetail(activeLogId);
 }
 
-function createMissingFile(apiPath) {
-  const defaultContent = JSON.stringify({ Outcome: "Success", Message: "Success", Data: {} }, null, 2);
-  openModal('创建接口文件 (永久保存)', apiPath, defaultContent, async (content) => {
-    const res = await fetch('/admin/file/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, content }) });
+function createMissingFile(apiPath, logId) {
+  let initialContent = JSON.stringify({ Outcome: "Success", Message: "Success", Data: {} }, null, 2);
+  
+  if (logId !== undefined) {
+    const l = logs.find(log => log.id === logId);
+    if (l) {
+      let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+      if (body !== undefined && body !== null && body !== '') {
+        try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
+        initialContent = body;
+      }
+    }
+  }
+
+  // openModal signature: title, path, content, onSave, showFileActions, showPriority, currentPriority, currentRemark, showFolderSelect
+  openModal('创建接口文件 (永久保存)', apiPath, initialContent, async (content) => {
+    const folderSelect = document.getElementById('modalFolderSelect');
+    let folder = '';
+    if (folderSelect && document.getElementById('modalFolderDiv').style.display !== 'none') {
+       const selectedValue = folderSelect.value;
+       if (selectedValue && selectedValue !== '__new__') {
+         folder = selectedValue; // Use relative path
+       }
+    }
+    const res = await fetch('/admin/file/create', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ path: apiPath, content, folder }) 
+    });
     const result = await res.json();
     if (result.success) { alert('创建成功'); refreshLogs(); }
     else alert('创建失败: ' + result.error);
-  });
+  }, false, false, 1, '', true);
 }
 
 function editLocalFileFromLog(apiPath) {
@@ -2166,13 +2440,25 @@ async function deleteLocalFileFromLog(apiPath) {
   else alert('删除失败: ' + result.error);
 }
 
-function editLogOverride(path, isLocalFile = false) {
-  setTimeout(() => { setTempOverride(path, window.currentLogResponse || '{}', isLocalFile); }, 100);
+function editLogOverride(path, isLocalFile = false, logId) {
+  let initialContent = window.currentLogResponse || '{}';
+  let force = false;
+  if (logId !== undefined) {
+    const l = logs.find(log => log.id === logId);
+    if (l) {
+      let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
+      if (body !== undefined && body !== null && body !== '') {
+        initialContent = body;
+        force = true;
+      }
+    }
+  }
+  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force); }, 100);
 }
 
 async function removeOverrideAndRefreshLog(path) {
   await removeOverride(path);
-  showLogDetail(activeLogIdx);
+  showLogDetail(activeLogId);
 }
 
 
@@ -2362,7 +2648,7 @@ function showDetail(id) {
 }
 
 function getSelectedFiles() {
-  const folder = document.getElementById('outputFolder').value || 'public/mock';
+  const folder = document.getElementById('outputFolder').value || 'mock';
   const keepLast = document.getElementById('keepLast').checked;
   const pretty = document.getElementById('prettyJson').checked;
   const selected = entries.filter(e => selectedIds.has(e.id));
@@ -2396,7 +2682,7 @@ function openLogBatchSave() {
   // 填充文件夹下拉框
   const folderSelect = document.getElementById('logBatchFolder');
   const serverFolderSelect = document.getElementById('serverFolderSelect');
-  const currentFolder = serverFolderSelect ? serverFolderSelect.value : 'public/mock';
+  const currentFolder = serverFolderSelect ? serverFolderSelect.value : 'mock';
   
   // 移除 public/ 前缀显示
   const currentFolderName = currentFolder.replace(/^public\//, '');
@@ -2451,10 +2737,10 @@ function closeLogBatchSave() {
 
 function handleLogBatchFolderChange() {
   const select = document.getElementById('logBatchFolder');
-  if (select.value === '__new__') {
-    // 打开新建文件夹模态框
+  if (select && select.value === '__new__') {
     document.getElementById('newFolderName').value = '';
     document.getElementById('newFolderModal').classList.add('active');
+    window.newFolderTarget = 'logBatchFolder';
   }
 }
 
@@ -2462,8 +2748,12 @@ function closeNewFolderModal() {
   document.getElementById('newFolderModal').classList.remove('active');
   // 恢复下拉框选择
   const select = document.getElementById('logBatchFolder');
-  if (select.value === '__new__') {
+  if (select && select.value === '__new__') {
     select.selectedIndex = 0;
+  }
+  const modalSelect = document.getElementById('modalFolderSelect');
+  if (modalSelect && modalSelect.value === '__new__') {
+    modalSelect.selectedIndex = 0;
   }
 }
 
@@ -2480,21 +2770,19 @@ async function createNewFolder() {
     return;
   }
   
-  const folderPath = 'public/' + folderName;
+  const folder = folderName; // Use relative path
   
   // 检查是否已存在
-  if (publicFolders.some(f => f.path === folderPath)) {
+  if (publicFolders.some(f => f.path === folder)) { 
     alert('文件夹已存在');
     return;
   }
   
-  // 创建一个临时文件来创建文件夹
-  const tempFile = folderPath + '/.gitkeep';
   try {
-    const res = await fetch('/admin/har/save', {
+    const res = await fetch('/admin/folder/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [tempFile]: '' })
+      body: JSON.stringify({ name: folder }) // Send relative path
     });
     const result = await res.json();
     if (result.success) {
@@ -2502,14 +2790,21 @@ async function createNewFolder() {
       await loadPublicFolders();
       
       // 更新下拉框
-      const select = document.getElementById('logBatchFolder');
-      select.innerHTML = publicFolders.map(f => {
-        const name = f.path.replace(/^public\//, '');
-        return '<option value="' + name + '"' + (f.path === folderPath ? ' selected' : '') + '>' + name + '</option>';
-      }).join('');
-      select.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
-      select.value = folderName;
-      
+      const selects = [document.getElementById('logBatchFolder'), document.getElementById('modalFolderSelect')];
+      selects.forEach(select => {
+        if (!select) return;
+        select.innerHTML = publicFolders.map(f => {
+          const name = f.name;
+          return '<option value="' + name + '"' + (f.path === folder ? ' selected' : '') + '>' + name + '</option>';
+        }).join('');
+        select.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
+        
+        if (select.id === window.newFolderTarget || select.id === 'logBatchFolder') {
+          select.value = folderName;
+        }
+      });
+      window.newFolderTarget = null;
+
       closeNewFolderModal();
     } else {
       alert('创建失败: ' + result.error);
@@ -2709,8 +3004,7 @@ async function saveLogBatchToServer() {
     return;
   }
   
-  // 确保文件夹路径以 public/ 开头
-  const folder = folderInput.startsWith('public/') ? folderInput : 'public/' + folderInput;
+  const folder = folderInput;
   
   const data = {};
   logBatchSelectedIds.forEach(idx => {

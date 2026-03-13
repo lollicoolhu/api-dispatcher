@@ -20,6 +20,21 @@
         <div>服务器地址: <strong id="serverAddrs"></strong></div>
       </div>
       <div class="override-list">
+        <h3>数据存储配置</h3>
+        <div style="display:flex;flex-direction:column;gap:12px;padding:15px;background:#fff;border:1px solid #eee;border-radius:8px">
+          <div style="font-size:12px;color:#666;margin-bottom:5px">
+            配置和 Mock 数据的存储单位。所有配置都将持久化到此目录下。
+          </div>
+          <div style="display:flex;align-items:center;gap:15px;padding:10px;background:#f8f9fa;border-radius:6px;border:1px dashed #ddd">
+            <div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              <span style="font-size:11px;color:#999;display:block;margin-bottom:2px">当前全路径</span>
+              <code id="currentDataRootDisplay" style="font-size:13px;color:#333;font-weight:600">加载中...</code>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="selectSystemFolder()">选择系统文件夹</button>
+          </div>
+        </div>
+      </div>
+      <div class="override-list">
         <h3>本地文件夹列表 <span id="localFolderCount">(0)</span> <button class="btn btn-sm btn-success" onclick="openLocalFolderModal('')" style="margin-left:10px">添加文件夹</button></h3>
         <div id="localFolderList"></div>
       </div>
@@ -138,6 +153,12 @@
       </div>
       <div class="modal-body">
         <div style="margin-bottom:10px;font-family:monospace;font-size:12px;color:#666" id="modalPath"></div>
+        <div id="modalFolderDiv" style="display:none;margin-bottom:10px;align-items:center;gap:10px">
+          <label style="display:flex;align-items:center;gap:5px">
+            <span style="font-size:12px;color:#666">保存到文件夹:</span>
+            <select id="modalFolderSelect" style="padding:4px 8px;font-size:12px" onchange="handleModalFolderChange()"></select>
+          </label>
+        </div>
         <div id="modalPriorityDiv" style="display:none;margin-bottom:10px;align-items:center;gap:10px">
           <label style="display:flex;align-items:center;gap:5px">
             <span style="font-size:12px;color:#666">优先级:</span>
@@ -350,7 +371,7 @@
   </div>
 
   <!-- New Folder Modal -->
-  <div class="modal" id="newFolderModal">
+  <div class="modal" id="newFolderModal" style="z-index: 1050;">
     <div class="modal-content" style="max-width:400px">
       <div class="modal-header">
         <h3>新建文件夹</h3>
@@ -369,6 +390,8 @@
       </div>
     </div>
   </div>
+
+
 
   <script src="admin.js"></script>
 </body>
