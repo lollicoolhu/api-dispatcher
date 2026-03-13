@@ -56,7 +56,7 @@
       </div>
       <div class="stats"><span>文件数: <strong id="fileCount">0</strong></span><span id="parseFolderInfo"></span></div>
       <div class="main-layout">
-        <div class="list-panel"><div class="list-container" id="fileList" style="max-height:500px"></div></div>
+        <div class="list-panel"><div class="list-container" id="fileList"></div></div>
         <div class="detail-panel" id="fileDetailPanel"></div>
       </div>
     </div>
@@ -123,7 +123,7 @@
       </div>
       <div class="stats"><span>日志数: <strong id="logCount">0</strong></span></div>
       <div class="main-layout">
-        <div class="list-panel"><div class="list-container" id="logList" style="max-height:500px"></div></div>
+        <div class="list-panel"><div class="list-container" id="logList"></div></div>
         <div class="detail-panel" id="logDetailPanel"></div>
       </div>
     </div>
@@ -331,7 +331,7 @@
             <span>分组数: <strong id="logBatchGroupCount">0</strong></span>
             <span>已选: <strong id="logBatchSelectedCount">0</strong></span>
           </div>
-          <div class="list-container" id="logBatchList" style="max-height:500px;border:1px solid #ddd;border-radius:4px"></div>
+          <div class="list-container" id="logBatchList" style="border:1px solid #ddd;border-radius:4px"></div>
         </div>
         <div id="logBatchDetail" style="flex:1;min-width:0;border-left:1px solid #ddd;padding-left:15px;display:none">
           <div style="margin-bottom:10px;font-weight:bold">接口详情</div>
@@ -339,7 +339,7 @@
             <button class="detail-tab active" onclick="switchLogBatchDetailTab('response')">Response</button>
             <button class="detail-tab" onclick="switchLogBatchDetailTab('request')">Request</button>
           </div>
-          <div id="logBatchDetailContent" style="max-height:450px;overflow:auto"></div>
+          <div id="logBatchDetailContent" style="max-height:calc(100vh - 300px);overflow:auto"></div>
         </div>
       </div>
       <div class="modal-footer">
