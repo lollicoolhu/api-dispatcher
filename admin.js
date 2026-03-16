@@ -798,7 +798,7 @@ function confirmResolve(result) {
 // ========== JSON Editor Modal ==========
 let currentModalPath = '';
 
-function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '') {
+function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '', showConditions = false, currentConditions = [], currentConditionLogic = 'and') {
   const titleEl = document.getElementById('modalTitle');
   const pathEl = document.getElementById('modalPath');
   const editorEl = document.getElementById('jsonEditor');
@@ -857,6 +857,28 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
       remarkDiv.style.display = 'none';
     }
   }
+
+  // 显示/隐藏参数条件编辑器
+  const conditionsDiv = document.getElementById('modalConditionsDiv');
+  const conditionsList = document.getElementById('modalConditionsList');
+  if (conditionsDiv) {
+    if (showConditions) {
+      conditionsDiv.style.display = 'block';
+      if (conditionsList) {
+        conditionsList.innerHTML = '';
+        (currentConditions || []).forEach(c => addConditionRow(c));
+      }
+      const logicSelect = document.getElementById('modalConditionLogic');
+      if (logicSelect) {
+        logicSelect.checked = (currentConditionLogic === 'or');
+        const logicLabel = document.getElementById('modalConditionLogicLabel');
+        if (logicLabel) logicLabel.textContent = logicSelect.checked ? '满足任一条件 (或)' : '满足所有条件 (且)';
+      }
+    } else {
+      conditionsDiv.style.display = 'none';
+      if (conditionsList) conditionsList.innerHTML = '';
+    }
+  }
   
   const modal = document.getElementById('jsonModal');
   if (modal) {
@@ -884,6 +906,49 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
   }
 }
 
+// ---- 条件行管理 ----
+function addConditionRow(c = {}) {
+  const list = document.getElementById('modalConditionsList');
+  if (!list) return;
+  const idx = list.children.length;
+  const row = document.createElement('div');
+  row.className = 'condition-row';
+  row.style.cssText = 'display:flex;gap:6px;align-items:center';
+  row.innerHTML =
+    '<select class="cond-source" style="font-size:12px;padding:3px 6px">' +
+      '<option value="query"' + (c.source === 'query' || !c.source ? ' selected' : '') + '>Query</option>' +
+      '<option value="body"' + (c.source === 'body' ? ' selected' : '') + '>Body</option>' +
+    '</select>' +
+    '<input class="cond-key" type="text" placeholder="参数名" value="' + escapeHtml(c.key || '') + '" style="flex:1;font-size:12px;padding:3px 6px">' +
+    '<select class="cond-op" style="font-size:12px;padding:3px 6px">' +
+      '<option value="eq"'       + ((!c.op || c.op==='eq')       ? ' selected' : '') + '>等于</option>' +
+      '<option value="neq"'      + (c.op==='neq'      ? ' selected' : '') + '>不等于</option>' +
+      '<option value="contains"' + (c.op==='contains' ? ' selected' : '') + '>包含</option>' +
+      '<option value="exists"'   + (c.op==='exists'   ? ' selected' : '') + '>存在</option>' +
+    '</select>' +
+    '<input class="cond-value" type="text" placeholder="值" value="' + escapeHtml(c.value || '') + '" style="flex:1;font-size:12px;padding:3px 6px">' +
+    '<button onclick="this.parentElement.remove()" style="background:none;border:none;cursor:pointer;color:#dc3545;font-size:16px;line-height:1;padding:0 4px" title="删除">×</button>';
+  // 当 op 为 exists 时隐藏 value 输入
+  const opSelect = row.querySelector('.cond-op');
+  const valueInput = row.querySelector('.cond-value');
+  const toggleValue = () => { valueInput.style.display = opSelect.value === 'exists' ? 'none' : ''; };
+  opSelect.addEventListener('change', toggleValue);
+  toggleValue();
+  list.appendChild(row);
+}
+
+function getModalConditions() {
+  const list = document.getElementById('modalConditionsList');
+  if (!list) return [];
+  return Array.from(list.querySelectorAll('.condition-row')).map(row => ({
+    source: row.querySelector('.cond-source').value,
+    key:    row.querySelector('.cond-key').value.trim(),
+    op:     row.querySelector('.cond-op').value,
+    value:  row.querySelector('.cond-value').value.trim()
+  })).filter(c => c.key);
+}
+
+
 function handleModalFolderChange() {
   const select = document.getElementById('modalFolderSelect');
   if (select && select.value === '__new__') {
@@ -897,6 +962,7 @@ function closeModal() {
   document.getElementById('jsonModal').classList.remove('active');
   modalCallback = null;
   currentModalPath = '';
+  window._tempConditionsCache = null;
   // 由于 modal 是单例，重置所有版本管理相关的 UI 状态
   resetOverrideVersionModalView();
 }
@@ -1172,6 +1238,10 @@ function openOverrideVersionModal(path, versions) {
   if (priorityDiv) priorityDiv.style.display = 'none';
   const remarkDiv = document.getElementById('modalRemarkDiv');
   if (remarkDiv) remarkDiv.style.display = 'none';
+  const conditionsDiv = document.getElementById('modalConditionsDiv');
+  if (conditionsDiv) conditionsDiv.style.display = 'none';
+  const banner = document.getElementById('versionEditorBanner');
+  if (banner) banner.style.display = 'none';
   const permanentBtn = document.getElementById('modalPermanentBtn');
   if (permanentBtn) permanentBtn.style.display = 'none';
   const deleteBtn = document.getElementById('modalDeleteBtn');
@@ -1212,6 +1282,10 @@ function openOverrideVersionModal(path, versions) {
     versionListHtml += '<span style="margin-left:10px;font-size:11px;color:#666">' + createdAt + '</span>';
     if (remarkText) {
       versionListHtml += '<span class="version-remark-pill" style="margin-left:8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + remarkText + '">备注: ' + remarkText + '</span>';
+    }
+    if (v.conditions && v.conditions.length > 0) {
+      const logicText = v.conditionLogic === 'or' ? '或' : '且';
+      versionListHtml += '<span style="margin-left:6px;background:#dbeafe;color:#1d4ed8;border-radius:10px;padding:1px 8px;font-size:10px;white-space:nowrap">' + v.conditions.length + '个条件(' + logicText + ')</span>';
     }
     versionListHtml += '</div>';
     versionListHtml += '<div style="display:flex;gap:5px" onclick="event.stopPropagation()">';
@@ -1374,9 +1448,11 @@ function editOverrideVersion(path, versionId, forcedContent = undefined) {
   openModal('编辑临时修改版本', path, content, async (newContent) => {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, content: newContent, priority, remark }) });
+    const conditions = getModalConditions();
+    const conditionLogic = document.getElementById('modalConditionLogic')?.checked ? 'or' : 'and';
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, content: newContent, priority, remark, conditions, conditionLogic }) });
     await loadOverrides();
-  }, false, true, currentPriority, currentRemark);
+  }, false, true, currentPriority, currentRemark, false, '', true, version.conditions || [], version.conditionLogic || 'and');
 
   // 在编辑区域上方的色带中突出当前正在编辑的版本信息
   let banner = document.getElementById('versionEditorBanner');
@@ -1411,10 +1487,12 @@ function createNewOverrideVersion(path) {
   openModal('创建临时修改', path, content, async (newContent) => {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
+    const conditions = getModalConditions();
+    const conditionLogic = document.getElementById('modalConditionLogic')?.checked ? 'or' : 'and';
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark, conditions, conditionLogic }) });
     await loadOverrides();
     if (activeLogId !== null) showLogDetail(activeLogId);
-  }, false, true, enabledVersion ? (enabledVersion.priority ?? 1) : 1, enabledVersion ? (enabledVersion.remark || '') : '');
+  }, false, true, enabledVersion ? (enabledVersion.priority ?? 1) : 1, enabledVersion ? (enabledVersion.remark || '') : '', false, '', true, window._tempConditionsCache || [], 'and');
   
   // 在编辑区域上方的色带中显示“正在新建版本”，以及可选的基准版本备注
   let banner = document.getElementById('versionEditorBanner');
@@ -1432,16 +1510,17 @@ function createNewOverrideVersion(path) {
   }
 }
 
-async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false) {
+async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false, initialConditions = []) {
   const versions = overrides[path] || [];
   
-  // 如果有已有版本，显示版本管理弹窗（即使只有1个，也让用能看到版本信息并选择新建）
-  if (versions.length > 0) {
+  // 如果有已有版本，且没有初始条件（正常点击列表的修改），只展示列表面板
+  if (versions.length > 0 && !(initialConditions && initialConditions.length > 0)) {
     openOverrideVersionModal(path, versions);
     return;
   }
+
   
-  // 如果没有版本，创建新版本
+  // 如果没有版本，或者带有条件，创建新版本
   const enabledVersion = versions.find(v => v.enabled);
   
   // 使用启用的版本内容，如果有forceContent则强制使用新内容
@@ -1450,17 +1529,58 @@ async function setTempOverride(path, originalContent, showFileActions = false, f
   const currentRemark = enabledVersion ? (enabledVersion.remark || '') : '';
   
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
+
+  // 如果有历史版本，先渲染带左侧列表的面板布局
+  if (versions.length > 0) {
+    openOverrideVersionModal(path, versions);
+  }
+  
+  // 为后续的新建版本缓存日志带来的条件
+  window._tempConditionsCache = initialConditions || [];
+
+  const editor = document.getElementById('jsonEditor');
+  if (editor) editor.style.display = 'block';
+  
+  const modal = document.getElementById('jsonModal');
+  if (modal) {
+    if (versions.length > 0) {
+      modal.classList.add('version-layout');
+    } else {
+      modal.classList.remove('version-layout');
+      // 没有历史版本时不显示左侧列表空间
+      const oldContainer = document.getElementById('versionListContainer');
+      if (oldContainer) oldContainer.remove();
+    }
+  }
+
+
   
   openModal('创建临时修改', path, content, async (newContent) => {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
+    const conditions = getModalConditions();
+    const conditionLogic = document.getElementById('modalConditionLogic')?.checked ? 'or' : 'and';
     
     // 创建新版本（不指定 versionId）
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark }) });
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark, conditions, conditionLogic }) });
     await loadOverrides();
     
     if (activeLogId !== null) showLogDetail(activeLogId);
-  }, showFileActions, true, currentPriority, currentRemark);
+  }, showFileActions, true, currentPriority, currentRemark, false, showFileActions ? '保存' : '临时保存', true, initialConditions, 'and');
+
+  let banner = document.getElementById('versionEditorBanner');
+  if (!banner && editor) {
+    editor.insertAdjacentHTML('beforebegin', '<div id="versionEditorBanner" class="version-editor-banner"></div>');
+    banner = document.getElementById('versionEditorBanner');
+  }
+  if (banner) {
+    let html = '<span class="version-editor-title">新建版本</span>';
+    if (enabledVersion && enabledVersion.remark) {
+      const safeRemark = escapeHtml(enabledVersion.remark);
+      html += '<span class="version-remark-pill" style="margin-left:6px" title="' + safeRemark + '">基于: ' + safeRemark + '</span>';
+    }
+    banner.innerHTML = html;
+  }
 }
 
 // ========== 服务器文件管理 ==========
@@ -2443,6 +2563,7 @@ async function deleteLocalFileFromLog(apiPath) {
 function editLogOverride(path, isLocalFile = false, logId) {
   let initialContent = window.currentLogResponse || '{}';
   let force = false;
+  let initialConditions = [];
   if (logId !== undefined) {
     const l = logs.find(log => log.id === logId);
     if (l) {
@@ -2451,9 +2572,30 @@ function editLogOverride(path, isLocalFile = false, logId) {
         initialContent = body;
         force = true;
       }
+      
+      // 提取 query 参数
+      if (l.query && Object.keys(l.query).length > 0) {
+        Object.entries(l.query).forEach(([k, v]) => {
+          initialConditions.push({ source: 'query', key: k, op: 'eq', value: v });
+        });
+      }
+      
+      // 提取 body 参数 (仅在内容看起来是 JSON 时解析)
+      if (l.body && typeof l.body === 'string' && (l.body.startsWith('{') || l.body.startsWith('['))) {
+        try {
+          const parsed = JSON.parse(l.body);
+          if (parsed && typeof parsed === 'object') {
+            Object.entries(parsed).forEach(([k, v]) => {
+              if (typeof v !== 'object') { // 仅简单类型做默认匹配
+                initialConditions.push({ source: 'body', key: k, op: 'eq', value: String(v) });
+              }
+            });
+          }
+        } catch { }
+      }
     }
   }
-  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force); }, 100);
+  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force, initialConditions); }, 100);
 }
 
 async function removeOverrideAndRefreshLog(path) {
