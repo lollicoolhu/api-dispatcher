@@ -2,10 +2,19 @@
 let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
 let logs = [], expandedLogGroups = new Set(), activeLogId = null, logDetailTab = 'response', logRefreshTimer = null;
 let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folderMappings = {}, localFolders = {}, globalServers = {}, currentParseFolder = '';
+let pathDelays = {};
 let modalCallback = null, mappingTestTab = 'response';
 let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
 let publicFolders = [];
 let masterConfig = { externalFolderPath: '' };
+
+// 辅助函数：获取路径对应的延迟配置 (含归一化逻辑)
+function getPathDelay(path) {
+  if (!path) return null;
+  const normalized = path.replace(/\/$/, '') || '/';
+  const alt = normalized.startsWith('/') ? normalized.substring(1) : '/' + normalized;
+  return pathDelays[normalized] || pathDelays[alt] || null;
+}
 
 // 辅助函数：获取路径的启用版本
 function getEnabledOverride(path) {
@@ -22,7 +31,7 @@ function hasOverride(path) {
 
 // 初始化
 fetch('/admin/server-info').then(r => r.json()).then(d => {
-  document.getElementById('serverAddrs').innerHTML = d.addresses.map(a => 
+  document.getElementById('serverAddrs').innerHTML = d.addresses.map(a =>
     '<a href="' + a + '/admin" target="_blank" style="margin-right:10px">' + a + '</a>'
   ).join('');
 });
@@ -32,7 +41,8 @@ Promise.all([
   loadOverrides(false),
   loadMappings(false),
   loadFolderMappings(false),
-  loadLocalFolders(false)
+  loadLocalFolders(false),
+  loadPathDelays(false)
 ]).then(() => {
   // 所有数据加载完成后，统一渲染
   renderGlobalServers();
@@ -40,22 +50,50 @@ Promise.all([
   renderOverrides();
   renderMappings();
   renderFolderMappings();
+  renderPathDelays();
 });
 loadCookieRewrite();
+loadGlobalDelay();
 loadMasterConfig();
 
 async function loadMasterConfig() {
   const res = await fetch('/admin/master-config');
   const data = await res.json();
   masterConfig = data;
-  document.getElementById('currentDataRootDisplay').textContent = data.effectiveDataRoot;
+  const input = document.getElementById('dataRootInput');
+  if (input) input.value = data.effectiveDataRoot;
+}
+
+async function updateDataRootManual() {
+  const input = document.getElementById('dataRootInput');
+  const path = input.value.trim();
+  if (!path) return;
+  
+  const confirmed = await showConfirm('确定将存储目录更改为：\n' + path + ' ?', '切换存储目录', '确定', false);
+  if (confirmed) {
+    const saveRes = await fetch('/admin/master-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ externalFolderPath: path })
+    });
+    const saveResult = await saveRes.json();
+    if (saveResult.success) {
+      alert('存储目录已切换');
+      location.reload();
+    } else {
+      alert('切换失败: ' + saveResult.error);
+      loadMasterConfig();
+    }
+  } else {
+    loadMasterConfig();
+  }
 }
 
 // ========== 数据目录选择器 (系统级) ==========
 async function selectSystemFolder() {
   const res = await fetch('/admin/system/select-folder', { method: 'POST' });
   const result = await res.json();
-  
+
   if (result.success && result.path) {
     if (confirm('确定将存储目录切换至：\n' + result.path + ' ?')) {
       const saveRes = await fetch('/admin/master-config', {
@@ -83,22 +121,22 @@ async function loadPublicFolders(currentFolder) {
   const res = await fetch('/admin/folders');
   const data = await res.json();
   publicFolders = data.folders || [];
-  
+
   // 更新 HAR 解析页面的输出文件夹下拉框
   const harSelect = document.getElementById('outputFolder');
   if (harSelect) {
-    harSelect.innerHTML = publicFolders.map(f => 
+    harSelect.innerHTML = publicFolders.map(f =>
       '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
     ).join('');
     if (publicFolders.length === 0) {
       harSelect.innerHTML = '<option value="mock">mock</option>';
     }
   }
-  
+
   // 更新服务器页面的文件夹下拉框
   const serverSelect = document.getElementById('serverFolderSelect');
   if (serverSelect) {
-    serverSelect.innerHTML = publicFolders.map(f => 
+    serverSelect.innerHTML = publicFolders.map(f =>
       '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
     ).join('');
     if (publicFolders.length === 0) {
@@ -111,7 +149,7 @@ async function loadPublicFolders(currentFolder) {
 async function loadLocalFolders(autoRender = true) {
   // 先加载 public 文件夹列表
   await loadPublicFolders();
-  
+
   const res = await fetch('/admin/local-folders');
   const data = await res.json();
   localFolders = data.folders || {};
@@ -123,7 +161,7 @@ function renderLocalFolders() {
   const paths = Object.keys(localFolders);
   document.getElementById('localFolderCount').textContent = '(' + paths.length + ')';
   if (paths.length === 0) { list.innerHTML = '<em>无本地文件夹</em>'; return; }
-  
+
   // 按优先级分组，找出每个优先级的第一个文件夹
   const priorityGroups = {};
   paths.forEach(folderPath => {
@@ -136,14 +174,14 @@ function renderLocalFolders() {
       priorityGroups[priority].push(folderPath);
     }
   });
-  
+
   list.innerHTML = paths.map((folderPath, index) => {
     const f = localFolders[folderPath];
     const disabled = !f.enabled;
     const priority = f.priority ?? 0;
     const folderExists = publicFolders.some(pf => pf.path === folderPath);
     const folderNotExists = f.enabled && !folderExists;
-    
+
     // 检查是否被同优先级的其他文件夹阻挡（不是第一个）
     let blockedBySamePriority = false;
     if (f.enabled && !folderNotExists && priorityGroups[priority]) {
@@ -152,7 +190,7 @@ function renderLocalFolders() {
         blockedBySamePriority = true;
       }
     }
-    
+
     const unreachable = folderNotExists || blockedBySamePriority;
     const remarkHtml = f.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(f.remark) + '">' + escapeHtml(f.remark) + '</span>' : '';
     let unreachableLabel = '';
@@ -161,14 +199,15 @@ function renderLocalFolders() {
     } else if (blockedBySamePriority) {
       unreachableLabel = '同优先级(' + priority + ')已有其他文件夹';
     }
-    
+
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-    '<input type="checkbox" ' + (f.enabled ? 'checked' : '') + ' onchange="toggleLocalFolderEnabled(\'' + folderPath.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + folderPath + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-    remarkHtml +
-    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-    '<button class="btn btn-sm btn-info" onclick="openLocalFolderModal(\'' + folderPath.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeLocalFolder(\'' + folderPath.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<input type="checkbox" ' + (f.enabled ? 'checked' : '') + ' onchange="toggleLocalFolderEnabled(\'' + folderPath.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+      '<span class="path">' + folderPath + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+      remarkHtml +
+      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+      (f.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + f.delay + 'ms</span>' : '') +
+      '<button class="btn btn-sm btn-info" onclick="openLocalFolderModal(\'' + folderPath.replace(/'/g, "\\'") + '\')">编辑</button>' +
+      '<button class="btn btn-sm btn-danger" onclick="removeLocalFolder(\'' + folderPath.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
 }
 
@@ -190,12 +229,13 @@ async function removeLocalFolder(folderPath) {
 
 function openLocalFolderModal(folderPath) {
   const select = document.getElementById('localFolderSelect');
-  select.innerHTML = publicFolders.map(f => 
+  select.innerHTML = publicFolders.map(f =>
     '<option value="' + f.path + '"' + (f.path === folderPath ? ' selected' : '') + '>' + f.name + ' (' + f.path + ')</option>'
   ).join('');
-  
+
   const f = localFolders[folderPath] || {};
   document.getElementById('localFolderPriority').value = f.priority ?? 0;
+  document.getElementById('localFolderDelay').value = f.delay ?? 0;
   document.getElementById('localFolderRemark').value = f.remark || '';
   document.getElementById('localFolderModal').classList.add('active');
 }
@@ -207,10 +247,11 @@ function closeLocalFolderModal() {
 async function saveLocalFolderFromModal() {
   const folderPath = document.getElementById('localFolderSelect').value;
   const priority = parseInt(document.getElementById('localFolderPriority').value) || 0;
+  const delay = parseInt(document.getElementById('localFolderDelay').value) || 0;
   const remark = document.getElementById('localFolderRemark').value.trim();
   if (!folderPath) return alert('请选择文件夹');
-  await fetch('/admin/local-folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath, enabled: true, priority, remark }) });
-  localFolders[folderPath] = { enabled: true, priority, remark };
+  await fetch('/admin/local-folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath, enabled: true, priority, remark, delay }) });
+  localFolders[folderPath] = { enabled: true, priority, remark, delay };
   renderLocalFolders();
   // 刷新其他列表的可达性
   renderOverrides();
@@ -250,7 +291,7 @@ function updateRefreshInterval() {
   document.getElementById('logAutoRefresh').checked = true;
   startAutoRefresh();
 }
-document.getElementById('logList').addEventListener('scroll', function() {
+document.getElementById('logList').addEventListener('scroll', function () {
   if (this.scrollTop > 50) stopAutoRefresh();
 });
 
@@ -267,7 +308,7 @@ function renderGlobalServers() {
   const urls = Object.keys(globalServers);
   document.getElementById('globalServerCount').textContent = '(' + urls.length + ')';
   if (urls.length === 0) { list.innerHTML = '<em>无全局映射服务器</em>'; return; }
-  
+
   // 按优先级分组，找出每个优先级的第一个服务器
   const priorityGroups = {};
   urls.forEach(url => {
@@ -280,12 +321,12 @@ function renderGlobalServers() {
       priorityGroups[priority].push(url);
     }
   });
-  
+
   list.innerHTML = urls.map(url => {
     const s = globalServers[url];
     const disabled = !s.enabled;
     const priority = s.priority ?? 100;
-    
+
     // 检查是否被同优先级的其他服务器阻挡（不是第一个）
     let blockedBySamePriority = false;
     if (s.enabled && priorityGroups[priority]) {
@@ -294,18 +335,19 @@ function renderGlobalServers() {
         blockedBySamePriority = true;
       }
     }
-    
+
     const unreachable = blockedBySamePriority;
     const remarkHtml = s.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(s.remark) + '">' + escapeHtml(s.remark) + '</span>' : '';
     const unreachableLabel = blockedBySamePriority ? '同优先级(' + priority + ')已有其他服务器' : '';
-    
+
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-    '<input type="checkbox" ' + (s.enabled ? 'checked' : '') + ' onchange="toggleGlobalServerEnabled(\'' + url.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + url + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-    remarkHtml +
-    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-    '<button class="btn btn-sm btn-info" onclick="openGlobalServerModal(\'' + url.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeGlobalServer(\'' + url.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<input type="checkbox" ' + (s.enabled ? 'checked' : '') + ' onchange="toggleGlobalServerEnabled(\'' + url.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+      '<span class="path">' + url + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+      remarkHtml +
+      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+      (s.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + s.delay + 'ms</span>' : '') +
+      '<button class="btn btn-sm btn-info" onclick="openGlobalServerModal(\'' + url.replace(/'/g, "\\'") + '\')">编辑</button>' +
+      '<button class="btn btn-sm btn-danger" onclick="removeGlobalServer(\'' + url.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
 }
 
@@ -333,6 +375,7 @@ function openGlobalServerModal(url) {
   const s = globalServers[url] || {};
   document.getElementById('globalServerUrl').value = url || '';
   document.getElementById('globalServerPriority').value = s.priority ?? 100;
+  document.getElementById('globalServerDelay').value = s.delay ?? 0;
   document.getElementById('globalServerRemark').value = s.remark || '';
   document.getElementById('globalServerModal').classList.add('active');
 }
@@ -344,10 +387,11 @@ function closeGlobalServerModal() {
 async function saveGlobalServerFromModal() {
   const url = document.getElementById('globalServerUrl').value.trim();
   const priority = parseInt(document.getElementById('globalServerPriority').value) || 100;
+  const delay = parseInt(document.getElementById('globalServerDelay').value) || 0;
   const remark = document.getElementById('globalServerRemark').value.trim();
   if (!url) return alert('请输入服务器地址');
-  await fetch('/admin/global-servers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, enabled: true, priority, remark }) });
-  globalServers[url] = { enabled: true, priority, remark };
+  await fetch('/admin/global-servers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, enabled: true, priority, remark, delay }) });
+  globalServers[url] = { enabled: true, priority, remark, delay };
   renderGlobalServers();
   // 刷新其他列表的可达性
   renderOverrides();
@@ -368,6 +412,89 @@ async function updateCookieRewrite() {
   await fetch('/admin/cookie-rewrite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
 }
 
+// ========== 全局延迟 ==========
+async function loadGlobalDelay() {
+  const res = await fetch('/admin/global-delay');
+  const data = await res.json();
+  document.getElementById('globalDelayInput').value = data.delay || 0;
+}
+
+async function updateGlobalDelay() {
+  const delay = parseInt(document.getElementById('globalDelayInput').value) || 0;
+  await fetch('/admin/global-delay', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ delay }) });
+}
+
+// ========== 接口特定延迟 ==========
+async function loadPathDelays(autoRender = true) {
+  const res = await fetch('/admin/path-delays');
+  pathDelays = await res.json();
+  if (autoRender) renderPathDelays();
+}
+
+function renderPathDelays() {
+  const list = document.getElementById('pathDelayList');
+  const paths = Object.keys(pathDelays);
+  document.getElementById('pathDelayCount').textContent = '(' + paths.length + ')';
+  if (paths.length === 0) { list.innerHTML = '<em>无接口延迟</em>'; return; }
+
+  list.innerHTML = paths.map(p => {
+    const pd = pathDelays[p];
+    const disabled = !pd.enabled;
+    return '<div class="path-delay-item' + (disabled ? ' disabled' : '') + '">' +
+      '<div class="delay-badge">' + pd.delay + '<span class="ms">ms</span></div>' +
+      '<div class="path-info">' +
+        '<div class="path-url">' + p + '</div>' +
+        '<div class="path-status">' + (disabled ? '<span class="status-off">已禁用</span>' : '<span class="status-on">生效中</span>') + '</div>' +
+      '</div>' +
+      '<div class="item-actions">' +
+        '<button class="btn btn-sm btn-info" onclick="openPathDelayModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="deletePathDelay(\'' + p.replace(/'/g, "\\'") + '\')" style="margin-left:8px">删除</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openPathDelayModal(path = '') {
+  const pd = pathDelays[path] || { delay: 100, enabled: true };
+  document.getElementById('pathDelayModalTitle').textContent = path ? '编辑接口延迟' : '添加接口延迟';
+  document.getElementById('pathDelayPath').value = path;
+  document.getElementById('pathDelayPath').readOnly = !!path;
+  document.getElementById('pathDelayValue').value = pd.delay;
+  document.getElementById('pathDelayEnabled').checked = pd.enabled;
+  document.getElementById('pathDelayModal').classList.add('active');
+}
+
+function closePathDelayModal() {
+  document.getElementById('pathDelayModal').classList.remove('active');
+}
+
+async function savePathDelay() {
+  const path = document.getElementById('pathDelayPath').value.trim();
+  const delay = parseInt(document.getElementById('pathDelayValue').value) || 0;
+  const enabled = document.getElementById('pathDelayEnabled').checked;
+  if (!path) return alert('请输入接口路径');
+  await fetch('/admin/path-delays', { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify({ path, delay, enabled }) 
+  });
+  pathDelays[path] = { delay, enabled };
+  renderPathDelays();
+  closePathDelayModal();
+}
+
+async function deletePathDelay(path) {
+  const confirmed = await showConfirm('确定删除该接口的延迟设置?', '删除确认', '删除');
+  if (!confirmed) return;
+  await fetch('/admin/path-delays', { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify({ path, delay: null }) 
+  });
+  delete pathDelays[path];
+  renderPathDelays();
+}
+
 // ========== 映射管理 ==========
 let mappingTestData = null; // 缓存测试结果
 
@@ -382,30 +509,30 @@ function renderMappings() {
   const paths = Object.keys(mappings);
   document.getElementById('mappingCount').textContent = '(' + paths.length + ')';
   if (paths.length === 0) { list.innerHTML = '<em>无URL映射</em>'; return; }
-  
+
   list.innerHTML = paths.map(p => {
     const m = mappings[p];
     const isWildcard = p.endsWith('*');
     const disabled = !m.enabled;
     const priority = m.priority ?? 1;
-    
+
     // 收集所有可能阻挡当前路径的优先级来源
     const blockingPriorities = [];
-    
+
     // 1. 本地文件夹优先级（取所有启用的本地文件夹中的最高优先级）
     Object.values(localFolders).forEach(lf => {
       if (lf.enabled) {
         blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
       }
     });
-    
+
     // 2. 全局服务器（取所有启用的全局服务器中的最高优先级）
     Object.values(globalServers).forEach(gs => {
       if (gs.enabled) {
         blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
       }
     });
-    
+
     // 3. 同路径的临时修改（优先级更高的）
     const enabledOverride = getEnabledOverride(p);
     if (enabledOverride) {
@@ -414,7 +541,7 @@ function renderMappings() {
         blockingPriorities.push({ type: '临时修改', priority: overridePriority });
       }
     }
-    
+
     // 4. 同路径的其他URL映射（优先级更高的）- 只检查完全相同的路径
     Object.keys(mappings).forEach(otherPath => {
       if (otherPath !== p && mappings[otherPath].enabled && otherPath === p) {
@@ -424,7 +551,7 @@ function renderMappings() {
         }
       }
     });
-    
+
     // 5. 匹配的文件夹映射（优先级更高的）
     Object.keys(folderMappings).forEach(pattern => {
       const fm = folderMappings[pattern];
@@ -445,7 +572,7 @@ function renderMappings() {
         }
       }
     });
-    
+
     // 检查是否被更高优先级阻挡
     let blockedBy = null;
     if (m.enabled) {
@@ -457,19 +584,20 @@ function renderMappings() {
         }
       }
     }
-    
+
     const unreachable = !!blockedBy;
     const remarkHtml = m.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(m.remark) + '">' + escapeHtml(m.remark) + '</span>' : '';
     // 简洁的不可达原因
     const unreachableLabel = blockedBy ? '<' + blockedBy.type + '(' + blockedBy.priority + ')' : '';
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-    '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
-    '<span class="target">→ ' + m.target + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-    remarkHtml +
-    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-    '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+      '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
+      '<span class="target">→ ' + m.target + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+      remarkHtml +
+      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+      (m.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + m.delay + 'ms</span>' : '') +
+      '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+      '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
 }
 
@@ -490,6 +618,10 @@ async function updateMappingPriority(apiPath, priority) {
 }
 
 async function removeMapping(apiPath) {
+  const m = mappings[apiPath];
+  const target = m ? m.target : '未知目标';
+  const confirmed = await showConfirm('确定取消接口映射？\n\n接口：' + apiPath + '\n目标：' + target, '取消确认', '确认取消');
+  if (!confirmed) return;
   await fetch('/admin/mappings', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath }) });
   await loadMappings();
 }
@@ -499,6 +631,7 @@ function openMappingModal(apiPath) {
   const m = mappings[apiPath] || {};
   document.getElementById('mappingTarget').value = m.target || '';
   document.getElementById('mappingPriority').value = m.priority ?? 1;
+  document.getElementById('mappingDelay').value = m.delay ?? 0;
   document.getElementById('mappingRemark').value = m.remark || '';
   document.getElementById('mappingTestPath').value = apiPath && !apiPath.endsWith('*') ? apiPath : '';
   document.getElementById('mappingTestResult').classList.add('hidden');
@@ -515,11 +648,12 @@ async function saveMappingFromModal() {
   const apiPath = document.getElementById('mappingPath').value.trim();
   const target = document.getElementById('mappingTarget').value.trim();
   const priority = parseInt(document.getElementById('mappingPriority').value) || 1;
+  const delay = parseInt(document.getElementById('mappingDelay').value) || 0;
   const remark = document.getElementById('mappingRemark').value.trim();
   if (!apiPath) return alert('请输入接口路径');
   if (!target) return alert('请输入映射目标地址');
-  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target, enabled: true, priority, remark }) });
-  mappings[apiPath] = { target, enabled: true, priority, remark };
+  await fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, target, enabled: true, priority, remark, delay }) });
+  mappings[apiPath] = { target, enabled: true, priority, remark, delay };
   // 刷新所有列表，因为优先级变化会影响其他项的可达性
   renderMappings();
   renderOverrides();
@@ -558,9 +692,9 @@ function renderMappingTestResult() {
   let body = data.body || '';
   try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { }
   const statusClass = data.status >= 200 && data.status < 300 ? 'status-2xx' : data.status >= 400 && data.status < 500 ? 'status-4xx' : 'status-5xx';
-  
+
   // Request tab 内容
-  const requestContent = 
+  const requestContent =
     '<div style="margin-bottom:10px"><strong>请求信息</strong></div>' +
     '<div class="detail-content" style="max-height:80px;margin-bottom:10px"><table>' +
     '<tr><td>方法</td><td>GET</td></tr>' +
@@ -568,13 +702,13 @@ function renderMappingTestResult() {
     '</table></div>' +
     '<div style="margin-bottom:10px"><strong>请求 Headers</strong></div>' +
     '<div class="detail-content" style="max-height:120px">' + headerTable(data.reqHeaders || {}) + '</div>';
-  
+
   // Response tab 内容
-  const responseContent = 
+  const responseContent =
     '<div class="detail-content" style="max-height:180px;margin-bottom:10px"><pre>' + escapeHtml(body) + '</pre></div>' +
     '<div style="margin-bottom:10px"><strong>响应 Headers (' + (data.headers ? Object.keys(data.headers).length : 0) + ')</strong></div>' +
     '<div class="detail-content" style="max-height:120px">' + headerTable(data.headers) + '</div>';
-  
+
   resultDiv.innerHTML =
     '<div class="meta-row"><div class="meta-item">状态: <span class="status-code ' + statusClass + '">' + data.status + '</span></div><div class="meta-item">耗时: ' + data.time + 'ms</div><div class="meta-item">大小: ' + formatSize(data.size) + '</div></div>' +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;color:#666;word-break:break-all">' + data.url + '</div>' +
@@ -583,8 +717,8 @@ function renderMappingTestResult() {
     '<div class="tab-content' + (mappingTestTab === 'request' ? ' active' : '') + '">' + requestContent + '</div>';
 }
 
-function switchMappingTestTab(tab) { 
-  mappingTestTab = tab; 
+function switchMappingTestTab(tab) {
+  mappingTestTab = tab;
   renderMappingTestResult(); // 只重新渲染，不重新请求
 }
 
@@ -595,7 +729,7 @@ async function loadFolderMappings(autoRender = true) {
   const folderRes = await fetch('/admin/folders');
   const folderData = await folderRes.json();
   publicFolders = folderData.folders || [];
-  
+
   const res = await fetch('/admin/folder-mappings');
   folderMappings = await res.json();
   if (autoRender) renderFolderMappings();
@@ -606,7 +740,7 @@ function renderFolderMappings() {
   const patterns = Object.keys(folderMappings);
   document.getElementById('folderMappingCount').textContent = '(' + patterns.length + ')';
   if (patterns.length === 0) { list.innerHTML = '<em>无文件夹映射</em>'; return; }
-  
+
   // 判断 patternA 的匹配范围是否完全覆盖 patternB（两者都是“路径子树”匹配：等于或以其为前缀）
   const normalizeRoot = (pattern) => {
     if (!pattern) return '';
@@ -629,24 +763,24 @@ function renderFolderMappings() {
     // 检查文件夹是否存在
     const folderExists = publicFolders.some(f => f.path === m.folder);
     const folderNotExists = m.enabled && !folderExists;
-    
+
     // 收集所有可能阻挡当前路径的优先级来源
     const blockingPriorities = [];
-    
+
     // 1. 本地文件夹优先级（取所有启用的本地文件夹中的最高优先级）
     Object.values(localFolders).forEach(lf => {
       if (lf.enabled) {
         blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
       }
     });
-    
+
     // 2. 全局服务器（取所有启用的全局服务器中的最高优先级）
     Object.values(globalServers).forEach(gs => {
       if (gs.enabled) {
         blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
       }
     });
-    
+
     // 3. 匹配的临时修改（优先级更高的）
     Object.keys(overrides).forEach(overridePath => {
       const o = overrides[overridePath];
@@ -658,7 +792,7 @@ function renderFolderMappings() {
         }
       }
     });
-    
+
     // 4. 匹配的URL映射（优先级更高的）
     Object.keys(mappings).forEach(mappingPath => {
       const mp = mappings[mappingPath];
@@ -670,7 +804,7 @@ function renderFolderMappings() {
         }
       }
     });
-    
+
     // 5. 其他文件夹映射（优先级更高的）
     Object.keys(folderMappings).forEach(otherPattern => {
       if (otherPattern !== p && folderMappings[otherPattern].enabled) {
@@ -682,7 +816,7 @@ function renderFolderMappings() {
         }
       }
     });
-    
+
     // 检查是否被更高优先级阻挡
     let blockedBy = null;
     if (m.enabled && !folderNotExists) {
@@ -694,7 +828,7 @@ function renderFolderMappings() {
         }
       }
     }
-    
+
     const unreachable = folderNotExists || blockedBy;
     const remarkHtml = m.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(m.remark) + '">' + escapeHtml(m.remark) + '</span>' : '';
     // 简洁的不可达原因
@@ -705,13 +839,14 @@ function renderFolderMappings() {
       unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
     }
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-    '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleFolderMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
-    '<span class="target">→ ' + m.folder + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-    remarkHtml +
-    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-    '<button class="btn btn-sm btn-info" onclick="openFolderMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeFolderMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleFolderMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+      '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
+      '<span class="target">→ ' + m.folder + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+      remarkHtml +
+      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+      (m.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + m.delay + 'ms</span>' : '') +
+      '<button class="btn btn-sm btn-info" onclick="openFolderMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+      '<button class="btn btn-sm btn-danger" onclick="removeFolderMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
   }).join('');
 }
 
@@ -740,14 +875,15 @@ function openFolderMappingModal(pattern) {
   document.getElementById('folderMappingPattern').value = pattern || '';
   const m = folderMappings[pattern] || {};
   document.getElementById('folderMappingPriority').value = m.priority ?? 1;
+  document.getElementById('folderMappingDelay').value = m.delay ?? 0;
   document.getElementById('folderMappingRemark').value = m.remark || '';
-  
+
   // 填充文件夹下拉框
   const select = document.getElementById('folderMappingFolder');
-  select.innerHTML = publicFolders.map(f => 
+  select.innerHTML = publicFolders.map(f =>
     '<option value="' + f.path + '"' + (f.path === m.folder ? ' selected' : '') + '>' + f.name + ' (' + f.path + ')</option>'
   ).join('');
-  
+
   document.getElementById('folderMappingModal').classList.add('active');
 }
 
@@ -759,11 +895,12 @@ async function saveFolderMappingFromModal() {
   const pattern = document.getElementById('folderMappingPattern').value.trim();
   const folder = document.getElementById('folderMappingFolder').value;
   const priority = parseInt(document.getElementById('folderMappingPriority').value) || 1;
+  const delay = parseInt(document.getElementById('folderMappingDelay').value) || 0;
   const remark = document.getElementById('folderMappingRemark').value.trim();
   if (!pattern) return alert('请输入匹配路径');
   if (!folder) return alert('请选择映射文件夹');
-  await fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern, folder, enabled: true, priority, remark }) });
-  folderMappings[pattern] = { folder, enabled: true, priority, remark };
+  await fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pattern, folder, enabled: true, priority, remark, delay }) });
+  folderMappings[pattern] = { folder, enabled: true, priority, remark, delay };
   // 刷新所有列表，因为优先级变化会影响其他项的可达性
   renderFolderMappings();
   renderOverrides();
@@ -798,7 +935,7 @@ function confirmResolve(result) {
 // ========== JSON Editor Modal ==========
 let currentModalPath = '';
 
-function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '', showConditions = false, currentConditions = [], currentConditionLogic = 'and') {
+function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '', showConditions = false, currentConditions = [], currentConditionLogic = 'and', currentDelay = 0) {
   const titleEl = document.getElementById('modalTitle');
   const pathEl = document.getElementById('modalPath');
   const editorEl = document.getElementById('jsonEditor');
@@ -809,13 +946,13 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
   if (errorEl) errorEl.textContent = '';
   currentModalPath = path;
   modalCallback = onSave;
-  
+
   // 显示/隐藏永久保存和删除按钮
   const permanentBtn = document.getElementById('modalPermanentBtn');
   const deleteBtn = document.getElementById('modalDeleteBtn');
   if (permanentBtn) permanentBtn.style.display = showFileActions ? 'inline-block' : 'none';
   if (deleteBtn) deleteBtn.style.display = showFileActions ? 'inline-block' : 'none';
-  
+
   // 显示/隐藏文件夹选择
   const folderDiv = document.getElementById('modalFolderDiv');
   if (folderDiv) {
@@ -845,14 +982,15 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
       priorityDiv.style.display = 'none';
     }
   }
-  
-  // 显示/隐藏备注输入
+
   const remarkDiv = document.getElementById('modalRemarkDiv');
   const remarkInput = document.getElementById('modalRemark');
+  const delayInput = document.getElementById('modalDelay');
   if (remarkDiv) {
     if (showPriority) {
       remarkDiv.style.display = 'block';
       if (remarkInput) remarkInput.value = currentRemark || '';
+      if (delayInput) delayInput.value = currentDelay || 0;
     } else {
       remarkDiv.style.display = 'none';
     }
@@ -879,7 +1017,7 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
       if (conditionsList) conditionsList.innerHTML = '';
     }
   }
-  
+
   const modal = document.getElementById('jsonModal');
   if (modal) {
     modal.classList.add('active');
@@ -892,7 +1030,7 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
         '<button class="btn btn-secondary" onclick="formatJson()">格式化</button>' +
         '<button class="btn btn-secondary" onclick="closeModal()">取消</button>' +
         '<button class="btn btn-primary" id="modalSaveBtn">' + finalSaveText + '</button>';
-      
+
       const newDeleteBtn = document.getElementById('modalDeleteBtn');
       const newPermanentBtn = document.getElementById('modalPermanentBtn');
       if (newDeleteBtn) newDeleteBtn.style.display = showFileActions ? 'inline-block' : 'none';
@@ -916,15 +1054,15 @@ function addConditionRow(c = {}) {
   row.style.cssText = 'display:flex;gap:6px;align-items:center';
   row.innerHTML =
     '<select class="cond-source" style="font-size:12px;padding:3px 6px">' +
-      '<option value="query"' + (c.source === 'query' || !c.source ? ' selected' : '') + '>Query</option>' +
-      '<option value="body"' + (c.source === 'body' ? ' selected' : '') + '>Body</option>' +
+    '<option value="query"' + (c.source === 'query' || !c.source ? ' selected' : '') + '>Query</option>' +
+    '<option value="body"' + (c.source === 'body' ? ' selected' : '') + '>Body</option>' +
     '</select>' +
     '<input class="cond-key" type="text" placeholder="参数名" value="' + escapeHtml(c.key || '') + '" style="flex:1;font-size:12px;padding:3px 6px">' +
     '<select class="cond-op" style="font-size:12px;padding:3px 6px">' +
-      '<option value="eq"'       + ((!c.op || c.op==='eq')       ? ' selected' : '') + '>等于</option>' +
-      '<option value="neq"'      + (c.op==='neq'      ? ' selected' : '') + '>不等于</option>' +
-      '<option value="contains"' + (c.op==='contains' ? ' selected' : '') + '>包含</option>' +
-      '<option value="exists"'   + (c.op==='exists'   ? ' selected' : '') + '>存在</option>' +
+    '<option value="eq"' + ((!c.op || c.op === 'eq') ? ' selected' : '') + '>等于</option>' +
+    '<option value="neq"' + (c.op === 'neq' ? ' selected' : '') + '>不等于</option>' +
+    '<option value="contains"' + (c.op === 'contains' ? ' selected' : '') + '>包含</option>' +
+    '<option value="exists"' + (c.op === 'exists' ? ' selected' : '') + '>存在</option>' +
     '</select>' +
     '<input class="cond-value" type="text" placeholder="值" value="' + escapeHtml(c.value || '') + '" style="flex:1;font-size:12px;padding:3px 6px">' +
     '<button onclick="this.parentElement.remove()" style="background:none;border:none;cursor:pointer;color:#dc3545;font-size:16px;line-height:1;padding:0 4px" title="删除">×</button>';
@@ -942,9 +1080,9 @@ function getModalConditions() {
   if (!list) return [];
   return Array.from(list.querySelectorAll('.condition-row')).map(row => ({
     source: row.querySelector('.cond-source').value,
-    key:    row.querySelector('.cond-key').value.trim(),
-    op:     row.querySelector('.cond-op').value,
-    value:  row.querySelector('.cond-value').value.trim()
+    key: row.querySelector('.cond-key').value.trim(),
+    op: row.querySelector('.cond-op').value,
+    value: row.querySelector('.cond-value').value.trim()
   })).filter(c => c.key);
 }
 
@@ -1060,7 +1198,7 @@ async function loadOverrides(autoRender = true) {
 function renderOverrides() {
   const list = document.getElementById('overrideList');
   const paths = Object.keys(overrides);
-  
+
   // 计算总版本数
   let totalVersions = 0;
   paths.forEach(p => {
@@ -1068,40 +1206,40 @@ function renderOverrides() {
       totalVersions += overrides[p].length;
     }
   });
-  
+
   document.getElementById('overrideCount').textContent = '(' + paths.length + ' 接口, ' + totalVersions + ' 版本)';
   if (paths.length === 0) { list.innerHTML = '<em>无临时修改</em>'; return; }
-  
+
   list.innerHTML = paths.map(p => {
     const versions = overrides[p] || [];
     if (!Array.isArray(versions) || versions.length === 0) return '';
-    
+
     const enabledVersion = versions.find(v => v.enabled);
     const priority = enabledVersion ? (enabledVersion.priority ?? 1) : 1;
-    
+
     // 检查 JSON 是否有效（仅对 JSON 路径）
     let jsonInvalid = false;
     if (enabledVersion && isJsonPath(p)) {
       try { JSON.parse(enabledVersion.content || ''); } catch { jsonInvalid = true; }
     }
-    
+
     // 收集所有可能阻挡当前路径的优先级来源
     const blockingPriorities = [];
-    
+
     // 1. 本地文件夹优先级
     Object.values(localFolders).forEach(lf => {
       if (lf.enabled) {
         blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
       }
     });
-    
+
     // 2. 全局服务器
     Object.values(globalServers).forEach(gs => {
       if (gs.enabled) {
         blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
       }
     });
-    
+
     // 3. 同路径的URL映射
     if (mappings[p] && mappings[p].enabled) {
       const mappingPriority = mappings[p].priority ?? 1;
@@ -1109,7 +1247,7 @@ function renderOverrides() {
         blockingPriorities.push({ type: 'URL映射', priority: mappingPriority });
       }
     }
-    
+
     // 4. 匹配的文件夹映射
     Object.keys(folderMappings).forEach(pattern => {
       const fm = folderMappings[pattern];
@@ -1128,7 +1266,7 @@ function renderOverrides() {
         }
       }
     });
-    
+
     // 检查是否被更高优先级阻挡
     let blockedBy = null;
     if (enabledVersion && !jsonInvalid) {
@@ -1140,10 +1278,10 @@ function renderOverrides() {
         }
       }
     }
-    
+
     const unreachable = jsonInvalid || blockedBy;
     const remarkHtml = enabledVersion && enabledVersion.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(enabledVersion.remark) + '">' + escapeHtml(enabledVersion.remark) + '</span>' : '';
-    
+
     // 简洁的不可达原因
     let unreachableLabel = '';
     if (jsonInvalid) {
@@ -1151,23 +1289,23 @@ function renderOverrides() {
     } else if (blockedBy) {
       unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
     }
-    
+
     const versionInfo = versions.length > 1 ? ' <span style="color:#666;font-size:10px">(' + versions.length + '个版本)</span>' : '';
-    
+
     return '<div class="override-item' + (!enabledVersion ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-    '<input type="checkbox" ' + (enabledVersion ? 'checked' : '') + ' onchange="toggleOverridePathEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-    '<span class="path">' + p + versionInfo + (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-    remarkHtml +
-    '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-    '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-    '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除全部</button></div>';
+      '<input type="checkbox" ' + (enabledVersion ? 'checked' : '') + ' onchange="toggleOverridePathEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+      '<span class="path">' + p + versionInfo + (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
+      remarkHtml +
+      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+      '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+      '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除全部</button></div>';
   }).join('');
 }
 
 async function toggleOverridePathEnabled(path, enabled) {
   const versions = overrides[path] || [];
   if (!Array.isArray(versions) || versions.length === 0) return;
-  
+
   if (enabled) {
     // 启用第一个版本（或之前启用的版本）
     const lastEnabled = versions.find(v => v.enabled);
@@ -1181,7 +1319,7 @@ async function toggleOverridePathEnabled(path, enabled) {
       }
     }
   }
-  
+
   await loadOverrides();
 }
 
@@ -1212,7 +1350,7 @@ async function editOverride(path) {
   if (!Array.isArray(versions)) {
     versions = [];
   }
-  
+
   // 打开版本管理弹窗
   openOverrideVersionModal(path, versions);
 }
@@ -1224,10 +1362,10 @@ function openOverrideVersionModal(path, versions) {
   const pathDiv = document.getElementById('modalPath');
   const editor = document.getElementById('jsonEditor');
   const footer = modal ? modal.querySelector('.modal-footer') : null;
-  
+
   title.textContent = '管理临时修改版本';
   pathDiv.textContent = path;
-  
+
   // 隐藏编辑器和其他控件（容错：元素可能暂时不存在）
   if (editor) {
     editor.style.display = 'none';
@@ -1248,7 +1386,7 @@ function openOverrideVersionModal(path, versions) {
   if (deleteBtn) deleteBtn.style.display = 'none';
   const saveBtn = document.getElementById('modalSaveBtn');
   if (saveBtn) saveBtn.style.display = 'none';
-  
+
   // 创建版本列表HTML
   let versionListHtml = '<div class="version-panel">';
   versionListHtml += '<div class="version-panel-header">';
@@ -1258,16 +1396,16 @@ function openOverrideVersionModal(path, versions) {
   versionListHtml += '<div style="margin-bottom:10px">';
   versionListHtml += '<button class="btn btn-success" onclick="createNewOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\')">+ 新建版本</button>';
   versionListHtml += '</div>';
-  
+
   versionListHtml += '<div id="versionAccordion" style="max-height:calc(100vh - 350px);min-height:260px;overflow-y:auto">';
-  
+
   versions.forEach((v, idx) => {
     const isEnabled = v.enabled;
     const createdAt = new Date(v.createdAt).toLocaleString('zh-CN');
     const remarkText = v.remark ? escapeHtml(v.remark) : '';
     const versionKey = 'version_' + v.id;
     const defaultExpanded = false; // 不再默认展开已启用的版本，全部折叠
-    
+
     // 版本头部（可点击折叠/展开）
     versionListHtml += '<div style="border:1px solid ' + (isEnabled ? '#28a745' : '#ddd') + ';border-radius:4px;margin-bottom:10px;background:' + (isEnabled ? '#f0fff4' : '#fff') + '">';
     versionListHtml += '<div style="padding:12px;cursor:pointer;display:flex;align-items:center;justify-content:space-between" onclick="toggleVersionAccordion(\'' + versionKey + '\')">';
@@ -1287,57 +1425,61 @@ function openOverrideVersionModal(path, versions) {
       const logicText = v.conditionLogic === 'or' ? '或' : '且';
       versionListHtml += '<span style="margin-left:6px;background:#dbeafe;color:#1d4ed8;border-radius:10px;padding:1px 8px;font-size:10px;white-space:nowrap">' + v.conditions.length + '个条件(' + logicText + ')</span>';
     }
+    if (v.delay) {
+      versionListHtml += '<span style="margin-left:6px;background:#fef3c7;color:#d97706;border-radius:10px;padding:1px 8px;font-size:10px;white-space:nowrap">' + v.delay + 'ms延迟</span>';
+    }
     versionListHtml += '</div>';
     versionListHtml += '<div style="display:flex;gap:5px" onclick="event.stopPropagation()">';
     versionListHtml += '<input type="radio" name="selectedVersion" value="' + v.id + '" ' + (isEnabled ? 'checked' : '') + ' onchange="selectOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')" title="选择此版本">';
     versionListHtml += '<button class="btn btn-sm btn-info" onclick="editOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">编辑</button>';
     versionListHtml += '<button class="btn btn-sm btn-danger" onclick="deleteOverrideVersionInModal(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除</button>';
     versionListHtml += '</div></div>';
-    
+
     // 版本详情（默认展开已启用的版本）
     versionListHtml += '<div id="' + versionKey + '_content" style="display:' + (defaultExpanded ? 'block' : 'none') + ';padding:12px;border-top:1px solid #eee;background:#fafafa">';
     versionListHtml += '<div style="margin-bottom:8px"><strong>优先级:</strong> ' + (v.priority ?? 1) + '</div>';
+    versionListHtml += '<div style="margin-bottom:8px"><strong>延迟:</strong> ' + (v.delay ?? 0) + 'ms</div>';
     versionListHtml += '<div style="margin-bottom:8px"><strong>备注:</strong> ' + remarkText + '</div>';
     versionListHtml += '<div style="margin-bottom:8px"><strong>内容预览:</strong></div>';
-    
+
     // 内容预览（最多显示10行）
     let contentPreview = v.content || '{}';
     try {
       const parsed = JSON.parse(contentPreview);
       contentPreview = JSON.stringify(parsed, null, 2);
-    } catch {}
+    } catch { }
     const lines = contentPreview.split('\n');
     const preview = lines.slice(0, 10).join('\n');
     const hasMore = lines.length > 10;
-    
+
     versionListHtml += '<pre style="max-height:200px;overflow:auto;background:#fff;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:11px">' + escapeHtml(preview);
     if (hasMore) {
       versionListHtml += '\n... (还有 ' + (lines.length - 10) + ' 行)';
     }
     versionListHtml += '</pre>';
     versionListHtml += '</div>';
-    
+
     versionListHtml += '</div>';
   });
-  
+
   versionListHtml += '</div>';
-  
+
   // 插入版本列表（容错：editor 可能为空）
   // 先移除旧的版本列表容器
   const old = document.getElementById('versionListContainer');
   if (old) old.remove();
-  
+
   // 使用 modal-body 作为父容器，而不是依赖 editor.parentElement
   const modalBody = modal.querySelector('.modal-body');
   if (modalBody) {
     modalBody.insertAdjacentHTML('afterbegin', '<div id="versionListContainer">' + versionListHtml + '</div>');
   }
-  
+
   // 修改底部按钮
   if (footer) {
     footer.innerHTML = '<button class="btn btn-secondary" onclick="closeOverrideVersionModal()">关闭</button>';
   }
-  
+
   modal.classList.add('active');
 }
 
@@ -1365,10 +1507,10 @@ async function selectOverrideVersion(path, versionId) {
 async function deleteOverrideVersionInModal(path, versionId) {
   const confirmed = await showConfirm('确定删除该版本？', '删除确认', '删除');
   if (!confirmed) return;
-  
+
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
   await loadOverrides();
-  
+
   // 如果还有版本，刷新版本列表（不关闭弹窗）
   const versions = overrides[path] || [];
   if (versions.length > 0) {
@@ -1386,7 +1528,7 @@ async function deleteOverrideVersionInModal(path, versionId) {
 function resetOverrideVersionModalView() {
   const container = document.getElementById('versionListContainer');
   if (container) container.remove();
-  
+
   const editor = document.getElementById('jsonEditor');
   if (editor) {
     editor.style.display = 'block';
@@ -1414,10 +1556,10 @@ async function enableOverrideVersion(path, versionId) {
 async function deleteOverrideVersion(path, versionId) {
   const confirmed = await showConfirm('确定删除该版本？', '删除确认', '删除');
   if (!confirmed) return;
-  
+
   await fetch('/admin/overrides', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId }) });
   await loadOverrides();
-  
+
   // 如果还有版本，重新打开版本管理窗口
   const versions = overrides[path] || [];
   if (versions.length > 0) {
@@ -1433,26 +1575,27 @@ function editOverrideVersion(path, versionId, forcedContent = undefined) {
   const version = versions.find(v => v.id === versionId);
   if (!version) return;
   const versionIndex = versions.findIndex(v => v.id === versionId);
-  
+
   let content = forcedContent !== undefined ? forcedContent : (version.content || '{}');
   const currentPriority = version.priority ?? 1;
   const currentRemark = version.remark || '';
-  
+
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
-  
+
   const editor = document.getElementById('jsonEditor');
   if (editor) editor.style.display = 'block';
   const modal = document.getElementById('jsonModal');
   if (modal) modal.classList.add('version-layout');
-  
+
   openModal('编辑临时修改版本', path, content, async (newContent) => {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
     const conditions = getModalConditions();
     const conditionLogic = document.getElementById('modalConditionLogic')?.checked ? 'or' : 'and';
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, content: newContent, priority, remark, conditions, conditionLogic }) });
+    const delay = parseInt(document.getElementById('modalDelay')?.value) || 0;
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, content: newContent, priority, remark, conditions, conditionLogic, delay }) });
     await loadOverrides();
-  }, false, true, currentPriority, currentRemark, false, '', true, version.conditions || [], version.conditionLogic || 'and');
+  }, false, true, currentPriority, currentRemark, false, '', true, version.conditions || [], version.conditionLogic || 'and', version.delay || 0);
 
   // 在编辑区域上方的色带中突出当前正在编辑的版本信息
   let banner = document.getElementById('versionEditorBanner');
@@ -1478,22 +1621,23 @@ function createNewOverrideVersion(path) {
     content = enabledVersion.content;
   }
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
-  
+
   const editor = document.getElementById('jsonEditor');
   if (editor) editor.style.display = 'block';
   const modal = document.getElementById('jsonModal');
   if (modal) modal.classList.add('version-layout');
-  
+
   openModal('创建临时修改', path, content, async (newContent) => {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
     const conditions = getModalConditions();
     const conditionLogic = document.getElementById('modalConditionLogic')?.checked ? 'or' : 'and';
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark, conditions, conditionLogic }) });
+    const delay = parseInt(document.getElementById('modalDelay')?.value) || 0;
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark, conditions, conditionLogic, delay }) });
     await loadOverrides();
     if (activeLogId !== null) showLogDetail(activeLogId);
-  }, false, true, enabledVersion ? (enabledVersion.priority ?? 1) : 1, enabledVersion ? (enabledVersion.remark || '') : '', false, '', true, window._tempConditionsCache || [], 'and');
-  
+  }, false, true, enabledVersion ? (enabledVersion.priority ?? 1) : 1, enabledVersion ? (enabledVersion.remark || '') : '', false, '', true, window._tempConditionsCache || [], 'and', 0);
+
   // 在编辑区域上方的色带中显示“正在新建版本”，以及可选的基准版本备注
   let banner = document.getElementById('versionEditorBanner');
   if (!banner && editor) {
@@ -1512,35 +1656,35 @@ function createNewOverrideVersion(path) {
 
 async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false, initialConditions = []) {
   const versions = overrides[path] || [];
-  
+
   // 如果有已有版本，且没有初始条件（正常点击列表的修改），只展示列表面板
   if (versions.length > 0 && !(initialConditions && initialConditions.length > 0)) {
     openOverrideVersionModal(path, versions);
     return;
   }
 
-  
+
   // 如果没有版本，或者带有条件，创建新版本
   const enabledVersion = versions.find(v => v.enabled);
-  
+
   // 使用启用的版本内容，如果有forceContent则强制使用新内容
   let content = (enabledVersion && !forceContent) ? enabledVersion.content : originalContent;
   const currentPriority = enabledVersion ? (enabledVersion.priority ?? 1) : 1;
   const currentRemark = enabledVersion ? (enabledVersion.remark || '') : '';
-  
+
   try { content = JSON.stringify(JSON.parse(content), null, 2); } catch { }
 
   // 如果有历史版本，先渲染带左侧列表的面板布局
   if (versions.length > 0) {
     openOverrideVersionModal(path, versions);
   }
-  
+
   // 为后续的新建版本缓存日志带来的条件
   window._tempConditionsCache = initialConditions || [];
 
   const editor = document.getElementById('jsonEditor');
   if (editor) editor.style.display = 'block';
-  
+
   const modal = document.getElementById('jsonModal');
   if (modal) {
     if (versions.length > 0) {
@@ -1554,19 +1698,20 @@ async function setTempOverride(path, originalContent, showFileActions = false, f
   }
 
 
-  
+
   openModal('创建临时修改', path, content, async (newContent) => {
     const priority = parseInt(document.getElementById('modalPriority').value) || 1;
     const remark = document.getElementById('modalRemark').value.trim();
     const conditions = getModalConditions();
     const conditionLogic = document.getElementById('modalConditionLogic')?.checked ? 'or' : 'and';
-    
+    const delay = parseInt(document.getElementById('modalDelay')?.value) || 0;
+
     // 创建新版本（不指定 versionId）
-    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark, conditions, conditionLogic }) });
+    await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, content: newContent, enabled: true, priority, remark, conditions, conditionLogic, delay }) });
     await loadOverrides();
-    
+
     if (activeLogId !== null) showLogDetail(activeLogId);
-  }, showFileActions, true, currentPriority, currentRemark, false, showFileActions ? '保存' : '临时保存', true, initialConditions, 'and');
+  }, showFileActions, true, currentPriority, currentRemark, false, showFileActions ? '保存' : '临时保存', true, initialConditions, 'and', 0);
 
   let banner = document.getElementById('versionEditorBanner');
   if (!banner && editor) {
@@ -1587,7 +1732,7 @@ async function setTempOverride(path, originalContent, showFileActions = false, f
 function initServerFolderSelect() {
   const select = document.getElementById('serverFolderSelect');
   const currentFolder = document.getElementById('folderSelect')?.value || '';
-  select.innerHTML = publicFolders.map(f => 
+  select.innerHTML = publicFolders.map(f =>
     '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
   ).join('');
   if (publicFolders.length === 0) {
@@ -1676,6 +1821,14 @@ function formatSize(b) {
   return b < 1024 ? b + 'B' : b < 1048576 ? (b / 1024).toFixed(1) + 'K' : (b / 1048576).toFixed(1) + 'M';
 }
 
+/**
+ * 格式化时长，1000ms 以上转为 s
+ */
+function formatDuration(ms) {
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
 // 判断 content-type 是否可以直接展示
 function isDisplayableContentType(contentType) {
   if (!contentType) return true;
@@ -1698,7 +1851,7 @@ function isImageContentType(contentType) {
 function renderResponseContent(body, headers, id, isBase64) {
   const contentType = headers && (headers['content-type'] || headers['Content-Type']) || '';
   const size = body ? body.length : 0;
-  
+
   // 图片类型，直接展示
   if (isImageContentType(contentType)) {
     const base64Data = isBase64 ? body : btoa(body);
@@ -1707,7 +1860,7 @@ function renderResponseContent(body, headers, id, isBase64) {
       '<div style="color:#666;margin-top:10px;font-size:11px">' + escapeHtml(contentType) + ' · ' + formatSize(size) + '</div>' +
       '</div>';
   }
-  
+
   if (!isDisplayableContentType(contentType)) {
     // 不可展示的类型，显示下载按钮
     return '<div style="text-align:center;padding:20px">' +
@@ -1716,14 +1869,14 @@ function renderResponseContent(body, headers, id, isBase64) {
       '<button class="btn btn-primary" onclick="downloadResponseContent(\'' + id + '\')">下载内容</button>' +
       '</div>';
   }
-  
+
   // 可展示的类型
   let formatted = body || '';
   try { formatted = JSON.stringify(JSON.parse(formatted), null, 2); } catch { }
-  
+
   // 添加复制按钮
   return '<div style="position:relative">' +
-    '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(\'' + id + '\', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
+    '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(\'' + id + '\', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">复制</button>' +
     '<pre>' + escapeHtml(formatted) + '</pre>' +
     '</div>';
 }
@@ -1733,10 +1886,10 @@ function downloadResponseContent(logId) {
   const l = logs.find(log => log.id === logId);
   if (!l) return;
   const body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
-  const contentType = l.mappingResponse ? 
+  const contentType = l.mappingResponse ?
     (l.mappingResponse.headers['content-type'] || l.mappingResponse.headers['Content-Type'] || 'application/octet-stream') :
     'application/octet-stream';
-  
+
   // 根据 content-type 确定文件扩展名
   let ext = '.bin';
   if (contentType.includes('image/png')) ext = '.png';
@@ -1745,7 +1898,7 @@ function downloadResponseContent(logId) {
   else if (contentType.includes('image/webp')) ext = '.webp';
   else if (contentType.includes('application/pdf')) ext = '.pdf';
   else if (contentType.includes('application/zip')) ext = '.zip';
-  
+
   const filename = l.path.replace(/\//g, '_').substring(1) + ext;
   const blob = new Blob([body], { type: contentType });
   const url = URL.createObjectURL(blob);
@@ -1760,16 +1913,16 @@ function downloadResponseContent(logId) {
 function copyResponseContent(logId, event) {
   const l = logs.find(log => log.id === logId);
   if (!l) return;
-  
+
   let body = l.mappingResponse ? l.mappingResponse.body : window.currentLogResponse;
-  
+
   // 如果是 JSON，格式化后复制
   try {
     body = JSON.stringify(JSON.parse(body), null, 2);
   } catch {
     // 不是 JSON，直接复制原始内容
   }
-  
+
   // 使用 Clipboard API 复制
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(body).then(() => {
@@ -1825,36 +1978,36 @@ function parsePageInfo(pageHeader) {
     const parts = pageHeader.split('>');
     const activity = parts[0] || '';
     const fragments = [];
-    
+
     // 从第二个元素开始都是 fragments
     if (parts.length > 1) {
       for (let i = 1; i < parts.length; i++) {
         const frag = parts[i].trim();
         if (!frag) continue;
-        
+
         // 先移除 * 标记
         const visible = frag.includes('*');
         let cleanFrag = frag.replace(/\*/g, '');
-        
+
         // 提取层级数字（匹配开头的 #数字）
         const match = cleanFrag.match(/^#(\d+)\s*(.+)$/);
         if (match) {
-          fragments.push({ 
-            name: match[2].trim(), 
-            depth: parseInt(match[1]), 
-            visible 
+          fragments.push({
+            name: match[2].trim(),
+            depth: parseInt(match[1]),
+            visible
           });
         } else {
           // 没有层级信息，默认为 0
-          fragments.push({ 
-            name: cleanFrag.trim(), 
-            depth: 0, 
-            visible 
+          fragments.push({
+            name: cleanFrag.trim(),
+            depth: 0,
+            visible
           });
         }
       }
     }
-    
+
     return { activity, fragments };
   } catch (e) {
     console.error('parsePageInfo error:', e);
@@ -1865,35 +2018,35 @@ function parsePageInfo(pageHeader) {
 function renderPageInfo(pageHeader) {
   const info = parsePageInfo(pageHeader);
   if (!info) return '<em>无页面信息</em>';
-  
 
-  
+
+
   let html = '<div style="margin-bottom:12px"><strong>Activity</strong></div>';
   html += '<div class="detail-content" style="padding:10px;margin-bottom:15px;background:#e3f2fd;border-left:3px solid #2196f3"><span style="color:#1976d2;font-weight:bold;font-size:14px">' + escapeHtml(info.activity) + '</span></div>';
-  
+
   if (info.fragments.length > 0) {
     html += '<div style="margin-bottom:10px"><strong>Fragments (' + info.fragments.length + ')</strong></div>';
     html += '<div class="detail-content" style="padding:10px">';
-    
+
     info.fragments.forEach((f, idx) => {
       // 根据层级深度设置左边距
       const marginLeft = f.depth * 24;
-      
+
       // 可见状态样式
       const bgColor = f.visible ? '#e8f5e9' : '#f5f5f5';
       const borderColor = f.visible ? '#4caf50' : '#e0e0e0';
       const textColor = f.visible ? '#2e7d32' : '#757575';
       const icon = f.visible ? '👁️' : '　';
-      
+
       html += '<div style="margin-bottom:6px;margin-left:' + marginLeft + 'px;padding:8px 12px;background:' + bgColor + ';border-left:3px solid ' + borderColor + ';border-radius:4px;display:flex;align-items:center;gap:8px">';
       html += '<span style="font-size:16px">' + icon + '</span>';
       html += '<span style="color:' + textColor + ';font-weight:' + (f.visible ? 'bold' : 'normal') + ';font-family:monospace;font-size:13px">' + escapeHtml(f.name) + '</span>';
       html += '<span style="font-size:10px;color:#999;margin-left:auto">(层级:' + f.depth + ')</span>'; // 临时显示层级用于调试
       html += '</div>';
     });
-    
+
     html += '</div>';
-    
+
     // 添加图例说明
     html += '<div style="margin-top:10px;padding:8px;background:#f9f9f9;border-radius:4px;font-size:11px;color:#666">';
     html += '<strong>说明：</strong> ';
@@ -1902,10 +2055,10 @@ function renderPageInfo(pageHeader) {
     html += '<span>绿色背景 = 当前可见</span>';
     html += '</div>';
   }
-  
+
   html += '<div style="margin-top:15px;margin-bottom:10px"><strong>原始数据</strong></div>';
   html += '<div class="detail-content" style="padding:10px;font-size:11px;word-break:break-all;color:#666;font-family:monospace">' + escapeHtml(pageHeader) + '</div>';
-  
+
   return html;
 }
 
@@ -1916,28 +2069,28 @@ async function refreshLogs(skipDetail = false) {
   logs = await res.json();
   document.getElementById('logCount').textContent = logs.length;
   renderLogs();
-  
+
   // 如果当前有选中的日志，且它还在列表中，则决定是否刷新详情板内容
   if (activeLogId !== null) {
-      const exists = logs.some(l => l.id === activeLogId);
-      if (exists) {
-          // 如果 skipDetail 为 true (自动刷新时)，则仅维持列表选中态，不刷新详情板避免闪烁或重置视图
-          if (!skipDetail) {
-              updateLogDetailContent(activeLogId);
-          }
-      } else {
-          activeLogId = null;
-          document.getElementById('logDetailPanel').classList.remove('active');
+    const exists = logs.some(l => l.id === activeLogId);
+    if (exists) {
+      // 如果 skipDetail 为 true (自动刷新时)，则仅维持列表选中态，不刷新详情板避免闪烁或重置视图
+      if (!skipDetail) {
+        updateLogDetailContent(activeLogId);
       }
+    } else {
+      activeLogId = null;
+      document.getElementById('logDetailPanel').classList.remove('active');
+    }
   }
 }
 
 // 辅助函数：仅更新详情板内容，不触发重渲染列表
 function updateLogDetailContent(logId) {
-    const l = logs.find(log => log.id === logId);
-    if (!l) return;
-    // 这里我们实际上可以共用 showLogDetail 的逻辑，但为了避免某些 UI 跳动，我们可以提取它
-    showLogDetail(logId); 
+  const l = logs.find(log => log.id === logId);
+  if (!l) return;
+  // 这里我们实际上可以共用 showLogDetail 的逻辑，但为了避免某些 UI 跳动，我们可以提取它
+  showLogDetail(logId);
 }
 
 async function clearLogs() {
@@ -1963,7 +2116,7 @@ function renderLogs() {
   const container = document.getElementById('logList');
   const getStatusClass = (found) => found === true ? 'found' : found === 'mapping' ? 'mapping' : 'missing';
   const getStatusText = (found) => found === true ? '✓' : found === 'mapping' ? '⇄' : '404';
-  
+
   // 格式化时间为时分秒毫秒
   const formatTime = (timeStr) => {
     // timeStr 格式: "03/10/2026 04:30:00 PM" 或类似
@@ -1973,32 +2126,32 @@ function renderLogs() {
     }
     return timeStr;
   };
-  
+
   // 计算时间差
   const formatTimeAgo = (timeStr) => {
     // timeStr 格式: "14:30:00.123" (只有时分秒毫秒，没有日期)
     // 由于没有日期信息，我们假设是今天的时间
     const now = new Date();
-    
+
     // 解析时间字符串
     const timeParts = timeStr.split(':');
     if (timeParts.length < 3) return '未知';
-    
+
     const hours = parseInt(timeParts[0]);
     const minutes = parseInt(timeParts[1]);
     const secondsParts = timeParts[2].split('.');
     const seconds = parseInt(secondsParts[0]);
     const milliseconds = secondsParts[1] ? parseInt(secondsParts[1]) : 0;
-    
+
     // 创建今天的时间对象
     const time = new Date();
     time.setHours(hours, minutes, seconds, milliseconds);
-    
+
     // 如果时间在未来（说明是昨天的），减去一天
     if (time > now) {
       time.setDate(time.getDate() - 1);
     }
-    
+
     const diff = Math.floor((now - time) / 1000);
     if (diff < 0) return '刚刚';
     if (diff < 60) return diff + '秒前';
@@ -2006,14 +2159,14 @@ function renderLogs() {
     if (diff < 86400) return Math.floor(diff / 3600) + '小时前';
     return Math.floor(diff / 86400) + '天前';
   };
-  
+
   // 获取文件类型标签
   const getFileTypeTag = (path) => {
     const ext = path.split('.').pop().toLowerCase();
     const types = { js: 'JS', css: 'CSS', html: 'HTML', htm: 'HTML', json: 'JSON', png: 'IMG', jpg: 'IMG', jpeg: 'IMG', gif: 'IMG', svg: 'SVG', woff: 'FONT', woff2: 'FONT', ttf: 'FONT' };
     return types[ext] || '';
   };
-  
+
   // 获取响应状态码
   const getResponseCode = (l) => {
     if (l.mappingResponse && l.mappingResponse.status) {
@@ -2021,7 +2174,7 @@ function renderLogs() {
     }
     return l.found === true ? 200 : l.found === 'mapping' ? null : 404;
   };
-  
+
   // 获取 Outcome 状态和内容
   const getOutcomeInfo = (l) => {
     if (l.mappingResponse && l.mappingResponse.body) {
@@ -2029,16 +2182,34 @@ function renderLogs() {
         const data = JSON.parse(l.mappingResponse.body);
         if (data.Outcome) {
           const isSuccess = data.Outcome.toLowerCase() === 'success';
-          return { 
+          return {
             class: isSuccess ? 'outcome-success' : 'outcome-fail',
             text: isSuccess ? '' : data.Outcome
           };
         }
-      } catch {}
+      } catch { }
     }
     return { class: '', text: '' };
   };
-  
+
+  const getDelayBadge = (l) => {
+    if (!l || typeof l !== 'object') return '';
+    // 优先使用请求时记录的实际延时
+    const delay = l.appliedDelay;
+    if (delay && delay > 0) {
+      return '<span class="badge-tag badge-delay" style="margin-left:8px" title="实际延迟: ' + delay + 'ms">' + formatDuration(delay) + '</span>';
+    }
+    return '';
+  };
+
+  const getDurationHtml = (l) => {
+    if (!l || !l.appliedDelay || l.appliedDelay <= 0) return '';
+    const total = l.mappingResponse ? l.mappingResponse.time : l.appliedDelay;
+    const delay = l.appliedDelay;
+    return '<span class="badge-tag badge-delay" style="margin-left:8px" title="延迟: ' + delay + 'ms">' + 
+           formatDuration(total) + '</span>';
+  };
+
   // 渲染单个日志项
   const renderLogItem = (l, showPath = true, isChild = false) => {
     const method = l.method || 'GET';
@@ -2047,7 +2218,7 @@ function renderLogs() {
     const fileType = getFileTypeTag(l.path);
     const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
     const folderTag = l.matchedFolder && l.found === true ? '<span class="folder-tag">' + escapeHtml(l.matchedFolder) + '</span>' : '';
-    
+
     return '<div class="log-item' + (isChild ? ' child-item' : '') + (activeLogId === l.id ? ' active' : '') + ' ' + outcomeInfo.class + '" onclick="showLogDetail(\'' + l.id + '\')">' +
       '<span class="log-time">' + formatTime(l.time) + '</span>' +
       '<span class="method method-' + method + '">' + method + '</span>' +
@@ -2055,7 +2226,8 @@ function renderLogs() {
       '<span class="log-status ' + getStatusClass(l.found) + '">' + getStatusText(l.found) + '</span>' +
       folderTag +
       (outcomeInfo.text ? '<span class="outcome-text">' + escapeHtml(outcomeInfo.text) + '</span>' : '') +
-      (showPath ? (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') + '<span class="log-path">' + l.path + '</span>' : '<span class="log-ip">' + l.ip + '</span>') +
+      (showPath ? (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') + '<span class="log-path" title="' + escapeHtml(l.path) + '">' + l.path + '</span>' : '<span class="log-ip">' + l.ip + '</span>') +
+      getDurationHtml(l) +
       '</div>';
   };
 
@@ -2063,24 +2235,24 @@ function renderLogs() {
   if (groupByParent) {
     const sessions = []; // 存放所有 HTML 页面的 Session
     const standaloneLogs = []; // 未归属任何页面的独立请求
-    
+
     // Pass 1: 找出所有的 HTML 页面请求作为独立 Session
     filtered.forEach(l => {
-      const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') || 
-                     (l.mappingResponse && l.mappingResponse.headers && 
-                      (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
+      const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') ||
+        (l.mappingResponse && l.mappingResponse.headers &&
+          (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
       if (isHtml) {
         sessions.push({ parent: l, children: [] });
       }
     });
-    
+
     // Pass 2: 为子资源匹配最近的 HTML Session
     filtered.forEach(l => {
-      const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') || 
-                     (l.mappingResponse && l.mappingResponse.headers && 
-                      (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
+      const isHtml = l.path.endsWith('.html') || l.path.endsWith('.htm') ||
+        (l.mappingResponse && l.mappingResponse.headers &&
+          (l.mappingResponse.headers['content-type'] || '').includes('text/html'));
       if (isHtml) return; // 页面本身已经被处理
-      
+
       if (l.parentPath) {
         let found = false;
         // 寻找时间最早于资源请求前最近的一次 HTML 加载
@@ -2134,25 +2306,26 @@ function renderLogs() {
         const respCode = getResponseCode(latestSession.parent);
         const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
         const fileType = getFileTypeTag(pagePath);
-        
+
         html += '<div class="group-header" onclick="toggleLogGroup(\'page:' + pagePath.replace(/'/g, "\\'") + '\')">' +
           '<span class="arrow ' + (expandedPage ? 'expanded' : '') + '">▶</span>' +
           '<span class="method method-' + method + '">' + method + '</span>' +
           (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
           '<span class="log-status ' + getStatusClass(latestSession.parent.found) + '">' + getStatusText(latestSession.parent.found) + '</span>' +
           (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
-          '<span class="path">' + pagePath + '</span>' +
+          '<span class="path" title="' + escapeHtml(pagePath) + '">' + pagePath + '</span>' +
+          getDurationHtml(latestSession.parent) +
           '<span class="badge badge-count">' + sessionCount + ' 次会话</span>' +
           '<span style="color:#666;font-size:11px">' + formatTimeAgo(latestSession.parent.time) + '</span></div>';
-          
+
         html += '<div class="group-items ' + (expandedPage ? 'expanded' : '') + '">';
-        
+
         pageSessions.forEach(session => {
           const p = session.parent;
           const children = session.children;
           const innerKey = 'session:' + p.id;
           const expandedInner = expandedLogGroups.has(innerKey);
-          
+
           const innerMethod = p.method || 'GET';
           const innerRespCode = getResponseCode(p);
           const innerRespClass = innerRespCode >= 200 && innerRespCode < 300 ? 'status-2xx' : innerRespCode >= 400 && innerRespCode < 500 ? 'status-4xx' : innerRespCode >= 500 ? 'status-5xx' : '';
@@ -2164,14 +2337,15 @@ function renderLogs() {
             (innerRespCode ? '<span class="status-code ' + innerRespClass + '">' + innerRespCode + '</span>' : '') +
             '<span class="log-status ' + getStatusClass(p.found) + '">' + getStatusText(p.found) + '</span>' +
             (innerFileType ? '<span class="file-type-tag">' + innerFileType + '</span>' : '') +
-            '<span class="path">' + p.path + '</span>' +
+            '<span class="path" title="' + escapeHtml(p.path) + '">' + p.path + '</span>' +
+            getDurationHtml(p) +
             '<span class="badge badge-count">' + children.length + ' 个资源</span>' +
             '<span style="color:#666;font-size:11px">' + p.time + '</span></div>';
-          
+
           html += '<div class="group-items ' + (expandedInner ? 'expanded' : '') + '">';
           html += renderLogItem(p, false);
           children.forEach(c => {
-             html += renderLogItem(c, true, true);
+            html += renderLogItem(c, true, true);
           });
           html += '</div>';
         });
@@ -2187,14 +2361,15 @@ function renderLogs() {
         const method = latest.method || 'GET';
         const respCode = getResponseCode(latest);
         const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
-        
+
         html += '<div class="group-header" onclick="toggleLogGroup(\'standalone:' + path.replace(/'/g, "\\'") + '\')">' +
           '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
           '<span class="method method-' + method + '">' + method + '</span>' +
           (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
           '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
           (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
-          '<span class="path">' + path + '</span>' +
+          '<span class="path" title="' + escapeHtml(path) + '">' + path + '</span>' +
+          getDurationHtml(latest) +
           '<span class="badge badge-count">' + items.length + '次</span>' +
           '<span style="color:#666;font-size:11px">' + timeAgo + '</span></div>';
         html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
@@ -2212,7 +2387,7 @@ function renderLogs() {
       const allMixed = [];
       sessions.forEach(s => allMixed.push({ type: 'session', item: s }));
       standaloneLogs.forEach(l => allMixed.push({ type: 'log', item: l }));
-      
+
       // 根据时间重新排序，确保渲染顺序正确（按最新时间排序）
       allMixed.sort((a, b) => {
         const timeA = a.type === 'session' ? a.item.parent.time : a.item.time;
@@ -2227,7 +2402,7 @@ function renderLogs() {
           const children = session.children;
           const innerKey = 'session:' + p.id;
           const expandedInner = expandedLogGroups.has(innerKey);
-          
+
           const innerMethod = p.method || 'GET';
           const innerRespCode = getResponseCode(p);
           const innerRespClass = innerRespCode >= 200 && innerRespCode < 300 ? 'status-2xx' : innerRespCode >= 400 && innerRespCode < 500 ? 'status-4xx' : innerRespCode >= 500 ? 'status-5xx' : '';
@@ -2239,14 +2414,15 @@ function renderLogs() {
             (innerRespCode ? '<span class="status-code ' + innerRespClass + '">' + innerRespCode + '</span>' : '') +
             '<span class="log-status ' + getStatusClass(p.found) + '">' + getStatusText(p.found) + '</span>' +
             (innerFileType ? '<span class="file-type-tag">' + innerFileType + '</span>' : '') +
-            '<span class="path">' + p.path + '</span>' +
+            '<span class="path" title="' + escapeHtml(p.path) + '">' + p.path + '</span>' +
+            getDurationHtml(p) +
             '<span class="badge badge-count">' + children.length + ' 个资源</span>' +
             '<span style="color:#666;font-size:11px">' + p.time + '</span></div>';
-          
+
           html += '<div class="group-items ' + (expandedInner ? 'expanded' : '') + '">';
           html += renderLogItem(p, false);
           children.forEach(c => {
-             html += renderLogItem(c, true, true);
+            html += renderLogItem(c, true, true);
           });
           html += '</div>';
         } else {
@@ -2276,14 +2452,15 @@ function renderLogs() {
       const method = latest.method || 'GET';
       const respCode = getResponseCode(latest);
       const respCodeClass = respCode >= 200 && respCode < 300 ? 'status-2xx' : respCode >= 400 && respCode < 500 ? 'status-4xx' : respCode >= 500 ? 'status-5xx' : '';
-      
+
       html += '<div class="group-header" onclick="toggleLogGroup(\'' + path.replace(/'/g, "\\'") + '\')">' +
         '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
         '<span class="method method-' + method + '">' + method + '</span>' +
         (respCode ? '<span class="status-code ' + respCodeClass + '">' + respCode + '</span>' : '') +
         '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
         (fileType ? '<span class="file-type-tag">' + fileType + '</span>' : '') +
-        '<span class="path">' + path + '</span>' +
+        '<span class="path" title="' + escapeHtml(path) + '">' + path + '</span>' +
+        getDurationHtml(latest) +
         '<span class="badge badge-count">' + items.length + '次</span>' +
         '<span style="color:#666;font-size:11px">' + timeAgo + '</span></div>';
       html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
@@ -2345,14 +2522,14 @@ function showLogDetail(logId) {
 
   // 针对映射日志，确保 Tab 选中态有效 (映射日志没有 'response' tab，只有 'access' 和 'proxy')
   if (isMapping) {
-      if (logDetailTab === 'response' || logDetailTab === 'request') {
-          logDetailTab = 'access';
-      }
+    if (logDetailTab === 'response' || logDetailTab === 'request') {
+      logDetailTab = 'access';
+    }
   } else {
-      // 普通日志转映射日志时，如果选中了 'proxy'，重置回 'response'
-      if (logDetailTab === 'access' || logDetailTab === 'proxy') {
-          logDetailTab = 'response';
-      }
+    // 普通日志转映射日志时，如果选中了 'proxy'，重置回 'response'
+    if (logDetailTab === 'access' || logDetailTab === 'proxy') {
+      logDetailTab = 'response';
+    }
   }
 
   const logHasOverride = hasOverride(l.path);
@@ -2367,16 +2544,16 @@ function showLogDetail(logId) {
     let proxyBody = mr.body || '';
     try { proxyBody = JSON.stringify(JSON.parse(proxyBody), null, 2); } catch { }
     const mrStatusClass = mr.status >= 200 && mr.status < 300 ? 'status-2xx' : mr.status >= 400 && mr.status < 500 ? 'status-4xx' : 'status-5xx';
-    
+
     // 访问请求 Tab（客户端 -> 本地服务器）
     let reqBodyFormatted = l.body || '';
     try { reqBodyFormatted = JSON.stringify(JSON.parse(reqBodyFormatted), null, 2); } catch { }
     const hasReqBody = l.body && l.body.length > 0;
-    
+
     // 根据 content-type 判断是否可展示
     const responseContentHtml = renderResponseContent(mr.body, mr.headers, logId, mr.isBase64);
-    
-    const accessTabHtml = 
+
+    const accessTabHtml =
       '<div class="section-title">Response <span class="section-tag">来自映射服务器</span></div>' +
       '<div class="detail-content">' + responseContentHtml + '</div>' +
       (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
@@ -2394,10 +2571,10 @@ function showLogDetail(logId) {
       '<div class="detail-content">' + headerTable(mr.headers) + '</div>' +
       '<div class="section-title">Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</div>' +
       '<div class="detail-content">' + headerTable(l.headers) + '</div>';
-    
+
     // 映射请求 Tab（本地服务器 -> 代理服务器）
     const proxyReqHeaders = l.proxyReqHeaders || {};
-    const proxyTabHtml = 
+    const proxyTabHtml =
       '<div class="section-title">Response</div>' +
       '<div class="detail-content">' + responseContentHtml + '</div>' +
       (hasReqBody ? '<div class="section-title">Request Body <span class="section-tag">透传访问请求</span></div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
@@ -2405,20 +2582,22 @@ function showLogDetail(logId) {
       '<div class="detail-content"><table>' +
       '<tr><td>目标URL</td><td style="word-break:break-all">' + mr.url + '</td></tr>' +
       '<tr><td>响应状态</td><td><span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></td></tr>' +
-      '<tr><td>耗时</td><td>' + mr.time + 'ms</td></tr>' +
+      '<tr><td>耗时</td><td>' + mr.time + 'ms' + (mr.networkTime !== undefined ? ' (网络: ' + mr.networkTime + 'ms + 延时: ' + (mr.time - mr.networkTime) + 'ms)' : '') + '</td></tr>' +
       '<tr><td>响应大小</td><td>' + formatSize(mr.size) + '</td></tr>' +
       '</table></div>' +
       '<div class="section-title">Response Headers (' + (mr.headers ? Object.keys(mr.headers).length : 0) + ')</div>' +
       '<div class="detail-content">' + headerTable(mr.headers) + '</div>' +
       '<div class="section-title">Request Headers <span class="section-tag">实际发送</span> (' + Object.keys(proxyReqHeaders).length + ')</div>' +
       '<div class="detail-content">' + headerTable(proxyReqHeaders) + '</div>';
-    
+
+    const appliedDelay = l.appliedDelay;
+    const delayTag = (appliedDelay && appliedDelay > 0) ? '<div class="meta-item"><span class="badge badge-info">延时: ' + appliedDelay + 'ms</span></div>' : '';
+
     panel.innerHTML =
-      '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div><div class="meta-item">响应: <span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></div><div class="meta-item">耗时: ' + mr.time + 'ms</div></div>' +
+      '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status mapping">映射</span></div><div class="meta-item">响应: <span class="status-code ' + mrStatusClass + '">' + mr.status + '</span></div><div class="meta-item">耗时: ' + mr.time + 'ms' + (mr.networkTime !== undefined ? '(' + mr.networkTime + '+' + (mr.time - mr.networkTime) + ')' : '') + '</div>' + delayTag + '</div>' +
       (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
-      '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#666">本地: ' + l.path + '</div>' +
       '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#17a2b8">代理: ' + mr.url + '</div>' +
-      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', false, \'' + logId + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button></div>' +
+      '<div style="margin-bottom:10px"><button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">永久保存</button> <button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', false, \'' + logId + '\')">临时修改</button> <button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">编辑映射</button> <button class="btn btn-info btn-sm" onclick="openPathDelayModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置延时</button>' + (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + '</div>' +
       '<div class="detail-tabs">' + tabBtn('access', '访问请求') + tabBtn('proxy', '映射请求') + (hasPage ? tabBtn('page', 'Page') : '') + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'access' ? ' active' : '') + '">' + accessTabHtml + '</div>' +
       '<div class="tab-content' + (logDetailTab === 'proxy' ? ' active' : '') + '">' + proxyTabHtml + '</div>' +
@@ -2429,73 +2608,106 @@ function showLogDetail(logId) {
   }
 
   // 普通请求
-  
-  // 异步获取响应内容
-  fetch(l.path).then(r => {
-    const resHeaders = {};
-    r.headers.forEach((v, k) => resHeaders[k] = v);
-    return r.text().then(text => ({ text, resHeaders }));
-  }).then(({ text, resHeaders }) => {
-    if (activeLogId !== l.id) return; // 防止异步跳格
-    let responseBody;
-    try { responseBody = JSON.stringify(JSON.parse(text), null, 2); } catch { responseBody = text; }
-    const respContent = document.getElementById('logResponseContent');
-    if (respContent) {
-      respContent.innerHTML = '<div style="position:relative">' +
-        '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(\'' + logId + '\', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">📋 复制</button>' +
-        '<pre>' + escapeHtml(responseBody) + '</pre>' +
-        '</div>';
-    }
-    const resHeadersEl = document.getElementById('logResHeaders');
-    if (resHeadersEl) resHeadersEl.innerHTML = headerTable(resHeaders);
-    window.currentLogResponse = text;
-    window.currentLogResHeaders = resHeaders;
-  }).catch(() => {
-    const respContent = document.getElementById('logResponseContent');
-    if (respContent) respContent.innerHTML = '<em>无法加载</em>';
-    window.currentLogResponse = '{}';
-  });
 
   // 本地请求详情 - 和映射详情的访问请求格式一致
   let reqBodyFormatted = l.body || '';
   try { reqBodyFormatted = JSON.stringify(JSON.parse(reqBodyFormatted), null, 2); } catch { }
   const hasReqBody = l.body && l.body.length > 0;
-  
-  const localDetailHtml = 
-    '<div class="section-title">Response</div>' +
-    '<div class="detail-content" id="logResponseContent"><em>加载中...</em></div>' +
-    (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
-    '<div class="section-title">Request</div>' +
-    '<div class="detail-content"><table>' +
-    '<tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr>' +
-    '<tr><td>路径</td><td>' + l.path + '</td></tr>' +
-    (l.actualPath ? '<tr><td>实际文件路径</td><td style="word-break:break-all">' + l.actualPath + '</td></tr>' : '') +
-    '<tr><td>完整URL</td><td>' + (l.fullUrl || l.path) + '</td></tr>' +
-    '<tr><td>访问时间</td><td>' + l.time + '</td></tr>' +
-    '<tr><td>客户端IP</td><td>' + l.ip + '</td></tr>' +
-    '</table></div>' +
-    '<div class="section-title">Query 参数</div>' +
-    '<div class="detail-content">' + queryTable(l.query) + '</div>' +
-    '<div class="section-title">Response Headers</div>' +
-    '<div class="detail-content" id="logResHeaders"><em>加载中...</em></div>' +
-    '<div class="section-title">Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</div>' +
-    '<div class="detail-content">' + headerTable(l.headers) + '</div>';
+
+  let localDetailHtml = '';
+
+  if (l.mappingResponse && l.mappingResponse.body) {
+    const mr = l.mappingResponse;
+    const responseContentHtml = renderResponseContent(mr.body, mr.headers, logId, mr.isBase64);
+    window.currentLogResponse = mr.body;
+    window.currentLogResHeaders = mr.headers;
+
+    localDetailHtml =
+      '<div class="section-title">Response</div>' +
+      '<div class="detail-content">' + responseContentHtml + '</div>' +
+      (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
+      '<div class="section-title">Request</div>' +
+      '<div class="detail-content"><table>' +
+      '<tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr>' +
+      '<tr><td>路径</td><td>' + l.path + '</td></tr>' +
+      (l.actualPath ? '<tr><td>实际文件路径</td><td style="word-break:break-all">' + l.actualPath + '</td></tr>' : '') +
+      '<tr><td>完整URL</td><td>' + (l.fullUrl || l.path) + '</td></tr>' +
+      '<tr><td>访问时间</td><td>' + l.time + '</td></tr>' +
+      '<tr><td>客户端IP</td><td>' + l.ip + '</td></tr>' +
+      '</table></div>' +
+      '<div class="section-title">Query 参数</div>' +
+      '<div class="detail-content">' + queryTable(l.query) + '</div>' +
+      '<div class="section-title">Response Headers</div>' +
+      '<div class="detail-content" id="logResHeaders">' + headerTable(mr.headers) + '</div>' +
+      '<div class="section-title">Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</div>' +
+      '<div class="detail-content">' + headerTable(l.headers) + '</div>';
+  } else {
+    // 异步获取响应内容
+    fetch(l.path).then(r => {
+      const resHeaders = {};
+      r.headers.forEach((v, k) => resHeaders[k] = v);
+      return r.text().then(text => ({ text, resHeaders }));
+    }).then(({ text, resHeaders }) => {
+      if (activeLogId !== l.id) return; // 防止异步跳格
+      let responseBody;
+      try { responseBody = JSON.stringify(JSON.parse(text), null, 2); } catch { responseBody = text; }
+      const respContent = document.getElementById('logResponseContent');
+      if (respContent) {
+        respContent.innerHTML = '<div style="position:relative">' +
+          '<button class="btn btn-sm btn-secondary" onclick="copyResponseContent(\'' + logId + '\', event)" style="position:absolute;top:5px;right:5px;z-index:10" title="复制响应内容">复制</button>' +
+          '<pre>' + escapeHtml(responseBody) + '</pre>' +
+          '</div>';
+      }
+      const resHeadersEl = document.getElementById('logResHeaders');
+      if (resHeadersEl) resHeadersEl.innerHTML = headerTable(resHeaders);
+      window.currentLogResponse = text;
+      window.currentLogResHeaders = resHeaders;
+    }).catch(() => {
+      const respContent = document.getElementById('logResponseContent');
+      if (respContent) respContent.innerHTML = '<em>无法加载</em>';
+      window.currentLogResponse = '{}';
+    });
+
+    localDetailHtml =
+      '<div class="section-title">Response</div>' +
+      '<div class="detail-content" id="logResponseContent"><em>加载中...</em></div>' +
+      (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
+      '<div class="section-title">Request</div>' +
+      '<div class="detail-content"><table>' +
+      '<tr><td>方法</td><td>' + (l.method || 'GET') + '</td></tr>' +
+      '<tr><td>路径</td><td>' + l.path + '</td></tr>' +
+      (l.actualPath ? '<tr><td>实际文件路径</td><td style="word-break:break-all">' + l.actualPath + '</td></tr>' : '') +
+      '<tr><td>完整URL</td><td>' + (l.fullUrl || l.path) + '</td></tr>' +
+      '<tr><td>访问时间</td><td>' + l.time + '</td></tr>' +
+      '<tr><td>客户端IP</td><td>' + l.ip + '</td></tr>' +
+      '</table></div>' +
+      '<div class="section-title">Query 参数</div>' +
+      '<div class="detail-content">' + queryTable(l.query) + '</div>' +
+      '<div class="section-title">Response Headers</div>' +
+      '<div class="detail-content" id="logResHeaders"><em>加载中...</em></div>' +
+      '<div class="section-title">Request Headers (' + (l.headers ? Object.keys(l.headers).length : 0) + ')</div>' +
+      '<div class="detail-content">' + headerTable(l.headers) + '</div>';
+  }
+
+  const appliedDelay = l.appliedDelay;
+  const delayTag = (appliedDelay && appliedDelay > 0) ? '<div class="meta-item"><span class="badge badge-info">延时: ' + appliedDelay + 'ms</span></div>' : '';
 
   panel.innerHTML =
-    '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status ' + statusClass + '">' + statusText + '</span></div>' + (logHasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') + (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + '</div>' +
+    '<div class="meta-row"><div class="meta-item"><span class="method method-' + (l.method || 'GET') + '">' + (l.method || 'GET') + '</span></div><div class="meta-item">时间: ' + l.time + '</div><div class="meta-item">IP: ' + l.ip + '</div><div class="meta-item">状态: <span class="log-status ' + statusClass + '">' + statusText + '</span></div>' + (logHasOverride ? '<div class="meta-item"><span class="badge badge-override">已临时修改</span></div>' : '') + (hasMapping ? '<div class="meta-item"><span class="badge badge-mapping">已映射</span></div>' : '') + (l.mappingResponse ? '<div class="meta-item">耗时: ' + l.mappingResponse.time + 'ms' + (l.mappingResponse.networkTime !== undefined ? '(' + l.mappingResponse.networkTime + '+' + (l.mappingResponse.time - l.mappingResponse.networkTime) + ')' : '') + '</div>' : '') + delayTag + '</div>' +
     (l.parentPath ? '<div style="font-family:monospace;font-size:11px;margin-bottom:5px;word-break:break-all;color:#6c757d">来源页面: ' + l.parentPath + '</div>' : '') +
     '<div style="font-family:monospace;font-size:11px;margin-bottom:10px;word-break:break-all;color:#666">' + (l.fullUrl || l.path) + '</div>' +
-    '<div style="margin-bottom:10px">' + 
-    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">创建文件</button> ' : '') + 
-    '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ', \'' + logId + '\')">修改返回</button> ' +
-    '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button>' + 
-    (logHasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') + 
-    (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') + 
-    '</div>' +
+    '<div style="margin-bottom:10px">' +
+    (isMissing ? '<button class="btn btn-success btn-sm" onclick="createMissingFile(\'' + l.path.replace(/'/g, "\\'") + '\', \'' + logId + '\')">创建文件</button> ' : '') +
+      '<button class="btn btn-warning btn-sm" onclick="editLogOverride(\'' + l.path.replace(/'/g, "\\'") + '\', ' + (!isMissing) + ', \'' + logId + '\')">修改返回</button> ' +
+      '<button class="btn btn-info btn-sm" onclick="openMappingModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置映射</button> ' +
+      '<button class="btn btn-info btn-sm" onclick="openPathDelayModal(\'' + l.path.replace(/'/g, "\\'") + '\')">设置延时</button>' +
+      (logHasOverride ? ' <button class="btn btn-danger btn-sm" onclick="removeOverrideAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消临时</button>' : '') +
+      (hasMapping ? ' <button class="btn btn-danger btn-sm" onclick="removeMappingAndRefreshLog(\'' + l.path.replace(/'/g, "\\'") + '\')">取消映射</button>' : '') +
+      '</div>' +
     (hasPage ? '<div class="detail-tabs">' + tabBtn('response', '详情') + tabBtn('page', 'Page') + '</div>' +
-    '<div class="tab-content' + (logDetailTab !== 'page' ? ' active' : '') + '">' + localDetailHtml + '</div>' +
-    '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>'
-    : localDetailHtml);
+      '<div class="tab-content' + (logDetailTab !== 'page' ? ' active' : '') + '">' + localDetailHtml + '</div>' +
+      '<div class="tab-content' + (logDetailTab === 'page' ? ' active' : '') + '">' + renderPageInfo(pageHeader) + '</div>'
+      : localDetailHtml);
   panel.classList.add('active');
   renderLogs();
 }
@@ -2507,7 +2719,7 @@ async function removeMappingAndRefreshLog(apiPath) {
 
 function createMissingFile(apiPath, logId) {
   let initialContent = JSON.stringify({ Outcome: "Success", Message: "Success", Data: {} }, null, 2);
-  
+
   if (logId !== undefined) {
     const l = logs.find(log => log.id === logId);
     if (l) {
@@ -2524,15 +2736,15 @@ function createMissingFile(apiPath, logId) {
     const folderSelect = document.getElementById('modalFolderSelect');
     let folder = '';
     if (folderSelect && document.getElementById('modalFolderDiv').style.display !== 'none') {
-       const selectedValue = folderSelect.value;
-       if (selectedValue && selectedValue !== '__new__') {
-         folder = selectedValue; // Use relative path
-       }
+      const selectedValue = folderSelect.value;
+      if (selectedValue && selectedValue !== '__new__') {
+        folder = selectedValue; // Use relative path
+      }
     }
-    const res = await fetch('/admin/file/create', { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ path: apiPath, content, folder }) 
+    const res = await fetch('/admin/file/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: apiPath, content, folder })
     });
     const result = await res.json();
     if (result.success) { alert('创建成功'); refreshLogs(); }
@@ -2543,7 +2755,7 @@ function createMissingFile(apiPath, logId) {
 function editLocalFileFromLog(apiPath) {
   const content = window.currentLogResponse || '{}';
   let formatted = content;
-  try { formatted = JSON.stringify(JSON.parse(content), null, 2); } catch {}
+  try { formatted = JSON.stringify(JSON.parse(content), null, 2); } catch { }
   openModal('永久修改文件', apiPath, formatted, async (newContent) => {
     const res = await fetch('/admin/file/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: apiPath, content: newContent }) });
     const result = await res.json();
@@ -2572,14 +2784,14 @@ function editLogOverride(path, isLocalFile = false, logId) {
         initialContent = body;
         force = true;
       }
-      
+
       // 提取 query 参数
       if (l.query && Object.keys(l.query).length > 0) {
         Object.entries(l.query).forEach(([k, v]) => {
           initialConditions.push({ source: 'query', key: k, op: 'eq', value: v });
         });
       }
-      
+
       // 提取 body 参数 (仅在内容看起来是 JSON 时解析)
       if (l.body && typeof l.body === 'string' && (l.body.startsWith('{') || l.body.startsWith('['))) {
         try {
@@ -2825,22 +3037,22 @@ function openLogBatchSave() {
   const folderSelect = document.getElementById('logBatchFolder');
   const serverFolderSelect = document.getElementById('serverFolderSelect');
   const currentFolder = serverFolderSelect ? serverFolderSelect.value : 'mock';
-  
+
   // 移除 public/ 前缀显示
   const currentFolderName = currentFolder.replace(/^public\//, '');
-  
+
   folderSelect.innerHTML = publicFolders.map(f => {
     const folderName = f.path.replace(/^public\//, '');
     return '<option value="' + folderName + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + folderName + '</option>';
   }).join('');
-  
+
   // 添加"新建文件夹"选项
   folderSelect.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
-  
+
   if (publicFolders.length === 0) {
     folderSelect.innerHTML = '<option value="mock">mock</option><option value="__new__">+ 新建文件夹...</option>';
   }
-  
+
   // 按路径分组日志
   logBatchGroups = {};
   logs.forEach((l, idx) => {
@@ -2850,7 +3062,7 @@ function openLogBatchSave() {
     }
     logBatchGroups[key].push({ ...l, idx });
   });
-  
+
   // 默认选中映射接口的最新一条
   logBatchSelectedIds.clear();
   for (const [path, items] of Object.entries(logBatchGroups)) {
@@ -2863,7 +3075,7 @@ function openLogBatchSave() {
       logBatchSelectedIds.add(items[0].idx);
     }
   }
-  
+
   document.getElementById('logBatchGroupCount').textContent = Object.keys(logBatchGroups).length;
   document.getElementById('logBatchSelectedCount').textContent = logBatchSelectedIds.size;
   logBatchActiveLog = null;
@@ -2905,21 +3117,21 @@ async function createNewFolder() {
     alert('请输入文件夹名称');
     return;
   }
-  
+
   // 验证文件夹名称（只允许字母、数字、下划线、中划线）
   if (!/^[a-zA-Z0-9_-]+$/.test(folderName)) {
     alert('文件夹名称只能包含字母、数字、下划线和中划线');
     return;
   }
-  
+
   const folder = folderName; // Use relative path
-  
+
   // 检查是否已存在
-  if (publicFolders.some(f => f.path === folder)) { 
+  if (publicFolders.some(f => f.path === folder)) {
     alert('文件夹已存在');
     return;
   }
-  
+
   try {
     const res = await fetch('/admin/folder/create', {
       method: 'POST',
@@ -2930,7 +3142,7 @@ async function createNewFolder() {
     if (result.success) {
       // 刷新文件夹列表
       await loadPublicFolders();
-      
+
       // 更新下拉框
       const selects = [document.getElementById('logBatchFolder'), document.getElementById('modalFolderSelect')];
       selects.forEach(select => {
@@ -2940,7 +3152,7 @@ async function createNewFolder() {
           return '<option value="' + name + '"' + (f.path === folder ? ' selected' : '') + '>' + name + '</option>';
         }).join('');
         select.innerHTML += '<option value="__new__">+ 新建文件夹...</option>';
-        
+
         if (select.id === window.newFolderTarget || select.id === 'logBatchFolder') {
           select.value = folderName;
         }
@@ -2960,7 +3172,7 @@ function renderLogBatchList() {
   const container = document.getElementById('logBatchList');
   const getStatusClass = (found) => found === true ? 'found' : found === 'mapping' ? 'mapping' : 'missing';
   const getStatusText = (found) => found === true ? '本地' : found === 'mapping' ? '映射' : '404';
-  
+
   let html = '';
   for (const [path, items] of Object.entries(logBatchGroups)) {
     const expanded = logBatchExpandedGroups.has(path);
@@ -2969,17 +3181,17 @@ function renderLogBatchList() {
     const someSelected = selectedCount > 0 && selectedCount < items.length;
     const noneSelected = selectedCount === 0;
     const latest = items[0];
-    
+
     // 复选框状态：全选=checked, 半选=indeterminate, 未选=unchecked
     const checkboxId = 'group-checkbox-' + path.replace(/[^a-zA-Z0-9]/g, '_');
-    
+
     html += '<div class="group"><div class="group-header" onclick="toggleLogBatchGroup(\'' + path.replace(/'/g, "\\'") + '\')">' +
       '<input type="checkbox" id="' + checkboxId + '" ' + (allSelected ? 'checked' : '') + ' onclick="event.stopPropagation();toggleLogBatchGroupSelect(\'' + path.replace(/'/g, "\\'") + '\', this.checked)">' +
       '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
       '<span class="log-status ' + getStatusClass(latest.found) + '">' + getStatusText(latest.found) + '</span>' +
       '<span class="path">' + path + '</span>' +
       '<span class="badge badge-count">' + items.length + '</span></div>';
-    
+
     html += '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
     items.forEach((l, idx) => {
       const isActive = logBatchActiveLog && logBatchActiveLog.idx === l.idx;
@@ -2990,10 +3202,10 @@ function renderLogBatchList() {
     });
     html += '</div></div>';
   }
-  
+
   container.innerHTML = html;
   document.getElementById('logBatchSelectedCount').textContent = logBatchSelectedIds.size;
-  
+
   // 设置半选状态
   for (const [path, items] of Object.entries(logBatchGroups)) {
     const selectedCount = items.filter(l => logBatchSelectedIds.has(l.idx)).length;
@@ -3009,10 +3221,10 @@ function renderLogBatchList() {
 function showLogBatchDetail(idx) {
   const log = logs[idx];
   if (!log) return;
-  
+
   logBatchActiveLog = log;
   logBatchActiveLog.idx = idx;
-  
+
   document.getElementById('logBatchDetail').style.display = 'block';
   renderLogBatchDetail();
   renderLogBatchList(); // 重新渲染以更新选中状态
@@ -3020,18 +3232,18 @@ function showLogBatchDetail(idx) {
 
 function renderLogBatchDetail() {
   if (!logBatchActiveLog) return;
-  
+
   const log = logBatchActiveLog;
   const content = document.getElementById('logBatchDetailContent');
-  
+
   const headerTable = (headers) => {
     if (!headers || Object.keys(headers).length === 0) return '<em>无</em>';
-    return '<table style="width:100%;font-size:12px"><tbody>' + 
-      Object.entries(headers).map(([k, v]) => 
+    return '<table style="width:100%;font-size:12px"><tbody>' +
+      Object.entries(headers).map(([k, v]) =>
         '<tr><td style="padding:4px;border-bottom:1px solid #eee;font-weight:bold;width:200px">' + escapeHtml(k) + '</td><td style="padding:4px;border-bottom:1px solid #eee;word-break:break-all">' + escapeHtml(String(v)) + '</td></tr>'
       ).join('') + '</tbody></table>';
   };
-  
+
   if (logBatchDetailTab === 'response') {
     // Response Body
     let body = '';
@@ -3042,35 +3254,35 @@ function renderLogBatchDetail() {
       } else {
         try {
           body = JSON.stringify(JSON.parse(body), null, 2);
-        } catch {}
+        } catch { }
       }
     } else {
       body = '本地文件或404';
     }
-    
+
     // Response Headers
     const headers = (log.found === 'mapping' && log.mappingResponse) ? log.mappingResponse.headers : {};
-    
-    content.innerHTML = 
+
+    content.innerHTML =
       '<div style="margin-bottom:15px"><strong style="font-size:14px">Response Body</strong></div>' +
       '<pre style="margin:0 0 20px 0;padding:10px;background:#f5f5f5;border-radius:4px;max-height:300px;overflow:auto;font-size:12px">' + escapeHtml(body) + '</pre>' +
       '<div style="margin-bottom:10px"><strong style="font-size:14px">Response Headers (' + Object.keys(headers).length + ')</strong></div>' +
       '<div style="padding:10px;background:#f5f5f5;border-radius:4px;max-height:200px;overflow:auto">' + headerTable(headers) + '</div>';
-      
+
   } else if (logBatchDetailTab === 'request') {
     const method = log.method || 'GET';
     const query = log.query || {};
     const body = log.body || '';
     const headers = log.headers || {};
-    
+
     let bodyDisplay = body;
     if (body) {
       try {
         bodyDisplay = JSON.stringify(JSON.parse(body), null, 2);
-      } catch {}
+      } catch { }
     }
-    
-    content.innerHTML = 
+
+    content.innerHTML =
       '<div style="margin-bottom:15px"><strong style="font-size:14px">Request Info</strong></div>' +
       '<div style="padding:10px;background:#f5f5f5;border-radius:4px;margin-bottom:20px">' +
       '<div style="margin-bottom:8px"><strong>Method:</strong> <span style="padding:2px 8px;background:#007bff;color:#fff;border-radius:3px;font-size:11px">' + method + '</span></div>' +
@@ -3140,19 +3352,19 @@ async function saveLogBatchToServer() {
     alert('请选择文件夹');
     return;
   }
-  
+
   if (logBatchSelectedIds.size === 0) {
     alert('请先选择要保存的日志');
     return;
   }
-  
+
   const folder = folderInput;
-  
+
   const data = {};
   logBatchSelectedIds.forEach(idx => {
     const l = logs[idx];
     if (!l) return;
-    
+
     let content = '';
     if (l.found === 'mapping' && l.mappingResponse) {
       content = l.mappingResponse.body || '{}';
@@ -3160,19 +3372,19 @@ async function saveLogBatchToServer() {
       // 本地文件，需要异步获取，这里先用空对象
       content = '{}';
     }
-    
+
     // 格式化
     const pretty = document.getElementById('logBatchPretty').checked;
     if (pretty) {
       try {
         content = JSON.stringify(JSON.parse(content), null, 2);
-      } catch {}
+      } catch { }
     }
-    
+
     const filePath = folder + l.path + '.json';
     data[filePath] = content;
   });
-  
+
   const res = await fetch('/admin/har/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   const result = await res.json();
   if (result.success) {

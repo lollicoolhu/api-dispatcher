@@ -28,7 +28,16 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 .detail-panel.active { display: block; }
 .group-header { background: #e9ecef; padding: 8px 12px; cursor: pointer; border-radius: 4px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
 .group-header:hover { background: #dee2e6; }
-.group-header .path { font-family: monospace; font-size: 12px; word-break: break-all; flex: 1; }
+.group-header .path {
+  font-family: monospace;
+  font-size: 12px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
 .group-header .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; }
 .badge-count { background: #007bff; color: #fff; }
 .badge-merged { background: #28a745; color: #fff; }
@@ -72,7 +81,16 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 .log-item.active { background: #e3f2fd; }
 .log-time { color: #666; font-size: 11px; width: 140px; }
 .log-ip { color: #666; font-size: 11px; width: 120px; }
-.log-path { font-family: monospace; font-size: 12px; flex: 1; word-break: break-all; }
+.log-path {
+  font-family: monospace;
+  font-size: 12px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
 .log-status { font-size: 11px; }
 .log-status.found { color: #28a745; }
 .log-status.missing { color: #dc3545; }
@@ -104,7 +122,7 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 .section-title { font-weight: bold; margin: 15px 0 8px 0; padding: 6px 10px; background: #e9ecef; border-radius: 4px; color: #495057; font-size: 12px; }
 .section-title:first-child { margin-top: 0; }
 .section-tag { font-weight: normal; font-size: 11px; color: #17a2b8; margin-left: 8px; }
-.tab-content .detail-content { max-height: none; }
+.tab-content .detail-content { max-height: 50vh; overflow-y: auto; }
 
 /* 临时版本管理弹窗的分区样式 */
 .version-panel { border: 1px solid #dee2e6; border-radius: 4px; padding: 10px 12px; background: #f8f9fa; margin-bottom: 10px; }
