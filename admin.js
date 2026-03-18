@@ -2,6 +2,7 @@
 let entries = [], groups = {}, selectedIds = new Set(), expandedGroups = new Set(), activeId = null, activeTab = 'response';
 let logs = [], expandedLogGroups = new Set(), activeLogId = null, logDetailTab = 'response', logRefreshTimer = null;
 let localFiles = [], activeFilePath = null, overrides = {}, mappings = {}, folderMappings = {}, localFolders = {}, globalServers = {}, currentParseFolder = '';
+let expandedOverrides = new Set();
 let pathDelays = {};
 let modalCallback = null, mappingTestTab = 'response';
 let logBatchGroups = {}, logBatchSelectedIds = new Set(), logBatchExpandedGroups = new Set();
@@ -1195,111 +1196,198 @@ async function loadOverrides(autoRender = true) {
   if (autoRender) renderOverrides();
 }
 
+// 辅助函数：格式化条件摘要显示
+function formatOverrideConditions(v) {
+  if (!v.conditions || v.conditions.length === 0) return '<span style="color:#999">默认(无条件)</span>';
+  const opMap = { eq: '=', contains: '≈', exists: '⚡', neq: '≠' };
+  const logicText = v.conditionLogic === 'or' ? ' | ' : ' & ';
+  
+  const tags = v.conditions.map(c => {
+    const src = c.source === 'body' ? 'B' : 'Q';
+    let text = src + '.' + c.key;
+    if (c.op === 'exists') text += ' 存在';
+    else text += opMap[c.op] + (c.value || '');
+    return text;
+  });
+  
+  return '<span class="condition-detail" style="background:#f0f7ff;color:#0056b3;padding:1px 6px;border-radius:3px;font-size:10px;border:1px solid #cce5ff">' + 
+         tags.join(logicText) + '</span>';
+}
+
 function renderOverrides() {
   const list = document.getElementById('overrideList');
   const paths = Object.keys(overrides);
 
-  // 计算总版本数
   let totalVersions = 0;
   paths.forEach(p => {
-    if (Array.isArray(overrides[p])) {
-      totalVersions += overrides[p].length;
-    }
+    totalVersions += (overrides[p] || []).length;
   });
 
-  document.getElementById('overrideCount').textContent = '(' + paths.length + ' 接口, ' + totalVersions + ' 版本)';
+  document.getElementById('overrideCount').textContent = '(' + paths.length + ' 接口, ' + totalVersions + ' 规则)';
   if (paths.length === 0) { list.innerHTML = '<em>无临时修改</em>'; return; }
 
-  list.innerHTML = paths.map(p => {
+  list.innerHTML = paths.sort().map(p => {
     const versions = overrides[p] || [];
-    if (!Array.isArray(versions) || versions.length === 0) return '';
-
-    const enabledVersion = versions.find(v => v.enabled);
-    const priority = enabledVersion ? (enabledVersion.priority ?? 1) : 1;
-
-    // 检查 JSON 是否有效（仅对 JSON 路径）
-    let jsonInvalid = false;
-    if (enabledVersion && isJsonPath(p)) {
-      try { JSON.parse(enabledVersion.content || ''); } catch { jsonInvalid = true; }
-    }
-
-    // 收集所有可能阻挡当前路径的优先级来源
-    const blockingPriorities = [];
-
-    // 1. 本地文件夹优先级
-    Object.values(localFolders).forEach(lf => {
-      if (lf.enabled) {
-        blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 });
+    if (versions.length === 0) return '';
+    
+    // 如果只有一条规则，则平铺展示，不使用折叠
+    if (versions.length === 1) {
+      const v = versions[0];
+      const priority = v.priority ?? 1;
+      let jsonInvalid = false;
+      if (isJsonPath(p)) {
+        try { JSON.parse(v.content || ''); } catch { jsonInvalid = true; }
       }
-    });
 
-    // 2. 全局服务器
-    Object.values(globalServers).forEach(gs => {
-      if (gs.enabled) {
-        blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 });
+      const blockingPriorities = [];
+      Object.values(localFolders).forEach(lf => { if (lf.enabled) blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 }); });
+      Object.values(globalServers).forEach(gs => { if (gs.enabled) blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 }); });
+      if (mappings[p] && mappings[p].enabled) {
+        const mappingPriority = mappings[p].priority ?? 1;
+        if (mappingPriority > priority) blockingPriorities.push({ type: 'URL映射', priority: mappingPriority });
       }
-    });
-
-    // 3. 同路径的URL映射
-    if (mappings[p] && mappings[p].enabled) {
-      const mappingPriority = mappings[p].priority ?? 1;
-      if (mappingPriority > priority) {
-        blockingPriorities.push({ type: 'URL映射', priority: mappingPriority });
-      }
-    }
-
-    // 4. 匹配的文件夹映射
-    Object.keys(folderMappings).forEach(pattern => {
-      const fm = folderMappings[pattern];
-      if (fm.enabled) {
-        let matched = false;
-        if (pattern.endsWith('*')) {
-          matched = p.startsWith(pattern.slice(0, -1));
-        } else {
-          matched = p === pattern || p.startsWith(pattern + '/');
+      Object.keys(folderMappings).forEach(pattern => {
+        const fm = folderMappings[pattern];
+        if (fm.enabled) {
+          let matched = false;
+          if (pattern.endsWith('*')) matched = p.startsWith(pattern.slice(0, -1));
+          else matched = p === pattern || p.startsWith(pattern + '/');
+          if (matched) {
+            const fmPriority = fm.priority ?? 1;
+            if (fmPriority > priority) blockingPriorities.push({ type: '文件夹映射', priority: fmPriority });
+          }
         }
-        if (matched) {
-          const fmPriority = fm.priority ?? 1;
-          if (fmPriority > priority) {
-            blockingPriorities.push({ type: '文件夹映射', priority: fmPriority });
+      });
+
+      let blockedBy = null;
+      if (v.enabled && !jsonInvalid) {
+        for (const bp of blockingPriorities) {
+          if (priority < bp.priority) {
+            if (!blockedBy || bp.priority > blockedBy.priority) blockedBy = bp;
           }
         }
       }
-    });
 
-    // 检查是否被更高优先级阻挡
-    let blockedBy = null;
-    if (enabledVersion && !jsonInvalid) {
-      for (const bp of blockingPriorities) {
-        if (priority < bp.priority) {
-          if (!blockedBy || bp.priority > blockedBy.priority) {
-            blockedBy = bp;
+      const unreachable = jsonInvalid || blockedBy;
+      const remarkHtml = v.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(v.remark) + '">' + escapeHtml(v.remark) + '</span>' : '';
+      let unreachableLabel = '';
+      if (jsonInvalid) unreachableLabel = 'JSON无效';
+      else if (blockedBy) unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
+
+      const conditionHtml = formatOverrideConditions(v);
+
+      return '<div class="override-item' + (!v.enabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+        '<input type="checkbox" ' + (v.enabled ? 'checked' : '') + ' onchange="toggleOverrideVersionEnabled(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\', this.checked)" title="启用/禁用此规则">' +
+        '<span class="path" title="' + escapeHtml(p) + '">' + p + '</span>' +
+        conditionHtml +
+        remarkHtml +
+        '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+        '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="removeOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除规则</button></div>';
+    }
+
+    // 多条规则，使用折叠展示
+    const expanded = expandedOverrides.has(p);
+    const enabledCount = versions.filter(v => v.enabled).length;
+    
+    let headerHtml = '<div class="group-header" onclick="toggleOverrideGroup(\'' + p.replace(/'/g, "\\'") + '\')">' +
+      '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
+      '<span class="path" title="' + escapeHtml(p) + '">' + p + '</span>' +
+      (enabledCount > 0 ? '<span class="badge badge-override" style="margin-left:8px;font-size:10px">已启用(' + enabledCount + ')</span>' : '<span style="color:#999;font-size:10px;margin-left:8px">未启用</span>') +
+      '<span class="badge badge-count" style="margin-left:8px">' + versions.length + ' 规则</span>' +
+      '<div style="flex:1"></div>' +
+      '<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); editOverride(\'' + p.replace(/'/g, "\\'") + '\')">管理</button>' +
+      '<button class="btn btn-sm btn-danger" style="margin-left:8px" onclick="event.stopPropagation(); removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">清空</button>' +
+      '</div>';
+
+    let itemsHtml = '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
+    itemsHtml += versions.map((v, idx) => {
+      const priority = v.priority ?? 1;
+      let jsonInvalid = false;
+      if (isJsonPath(p)) {
+        try { JSON.parse(v.content || ''); } catch { jsonInvalid = true; }
+      }
+
+      const blockingPriorities = [];
+      Object.values(localFolders).forEach(lf => { if (lf.enabled) blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 }); });
+      Object.values(globalServers).forEach(gs => { if (gs.enabled) blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 }); });
+      if (mappings[p] && mappings[p].enabled) {
+        const mappingPriority = mappings[p].priority ?? 1;
+        if (mappingPriority > priority) blockingPriorities.push({ type: 'URL映射', priority: mappingPriority });
+      }
+      Object.keys(folderMappings).forEach(pattern => {
+        const fm = folderMappings[pattern];
+        if (fm.enabled) {
+          let matched = false;
+          if (pattern.endsWith('*')) matched = p.startsWith(pattern.slice(0, -1));
+          else matched = p === pattern || p.startsWith(pattern + '/');
+          if (matched) {
+            const fmPriority = fm.priority ?? 1;
+            if (fmPriority > priority) blockingPriorities.push({ type: '文件夹映射', priority: fmPriority });
+          }
+        }
+      });
+
+      let blockedBy = null;
+      if (v.enabled && !jsonInvalid) {
+        for (const bp of blockingPriorities) {
+          if (priority < bp.priority) {
+            if (!blockedBy || bp.priority > blockedBy.priority) blockedBy = bp;
           }
         }
       }
-    }
 
-    const unreachable = jsonInvalid || blockedBy;
-    const remarkHtml = enabledVersion && enabledVersion.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(enabledVersion.remark) + '">' + escapeHtml(enabledVersion.remark) + '</span>' : '';
+      const unreachable = jsonInvalid || blockedBy;
+      const remarkHtml = v.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(v.remark) + '">' + escapeHtml(v.remark) + '</span>' : '';
+      let unreachableLabel = '';
+      if (jsonInvalid) unreachableLabel = 'JSON无效';
+      else if (blockedBy) unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
 
-    // 简洁的不可达原因
-    let unreachableLabel = '';
-    if (jsonInvalid) {
-      unreachableLabel = 'JSON无效';
-    } else if (blockedBy) {
-      unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
-    }
+      const conditionHtml = formatOverrideConditions(v);
 
-    const versionInfo = versions.length > 1 ? ' <span style="color:#666;font-size:10px">(' + versions.length + '个版本)</span>' : '';
+      return '<div class="override-item' + (!v.enabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '" style="margin-left: 15px; border-left: 2px solid #ddd; padding-left: 10px;">' +
+        '<input type="checkbox" ' + (v.enabled ? 'checked' : '') + ' onchange="toggleOverrideVersionEnabled(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\', this.checked)" title="启用/禁用此规则">' +
+        '<span class="path" style="font-size: 11px; color: #555; flex: 0 0 auto; width: 35px;"># ' + (idx + 1) + '</span>' +
+        conditionHtml +
+        (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') +
+        remarkHtml +
+        '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
+        '<div style="flex:1"></div>' +
+        '<button class="btn btn-sm" style="padding: 2px 6px; font-size: 10px;" onclick="editOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">编辑内容</button>' +
+        '<button class="btn btn-sm btn-danger" style="padding: 2px 6px; font-size: 10px; margin-left: 5px;" onclick="removeOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除规则</button></div>';
+    }).join('');
+    itemsHtml += '</div>';
 
-    return '<div class="override-item' + (!enabledVersion ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-      '<input type="checkbox" ' + (enabledVersion ? 'checked' : '') + ' onchange="toggleOverridePathEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-      '<span class="path">' + p + versionInfo + (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-      remarkHtml +
-      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-      '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-      '<button class="btn btn-sm btn-danger" onclick="removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">删除全部</button></div>';
+    return headerHtml + itemsHtml;
   }).join('');
+}
+
+function toggleOverrideGroup(path) {
+  if (expandedOverrides.has(path)) expandedOverrides.delete(path);
+  else expandedOverrides.add(path);
+  renderOverrides();
+}
+
+async function toggleOverrideVersionEnabled(path, versionId, enabled) {
+  await fetch('/admin/overrides', { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify({ path, versionId, enabled }) 
+  });
+  await loadOverrides();
+  renderOverrides();
+}
+
+async function removeOverrideVersion(path, versionId) {
+  const confirmed = await showConfirm('确定删除该请求版本？', '删除确认', '删除');
+  if (!confirmed) return;
+  await fetch('/admin/overrides', { 
+    method: 'DELETE', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify({ path, versionId }) 
+  });
+  await loadOverrides();
+  renderOverrides();
 }
 
 async function toggleOverridePathEnabled(path, enabled) {
@@ -1430,7 +1518,7 @@ function openOverrideVersionModal(path, versions) {
     }
     versionListHtml += '</div>';
     versionListHtml += '<div style="display:flex;gap:5px" onclick="event.stopPropagation()">';
-    versionListHtml += '<input type="radio" name="selectedVersion" value="' + v.id + '" ' + (isEnabled ? 'checked' : '') + ' onchange="selectOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')" title="选择此版本">';
+    versionListHtml += '<input type="checkbox" ' + (isEnabled ? 'checked' : '') + ' onchange="toggleOverrideVersionInModal(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\', this.checked)" title="启用/禁用此规则">';
     versionListHtml += '<button class="btn btn-sm btn-info" onclick="editOverrideVersion(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">编辑</button>';
     versionListHtml += '<button class="btn btn-sm btn-danger" onclick="deleteOverrideVersionInModal(\'' + path.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除</button>';
     versionListHtml += '</div></div>';
@@ -1497,10 +1585,22 @@ function toggleVersionAccordion(versionKey) {
 }
 
 // 选择版本（单选）
-async function selectOverrideVersion(path, versionId) {
-  await fetch('/admin/overrides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, versionId, enabled: true }) });
+async function toggleOverrideVersionInModal(path, versionId, enabled) {
+  await fetch('/admin/overrides', { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify({ path, versionId, enabled }) 
+  });
   await loadOverrides();
-  closeOverrideVersionModal();
+  // 不关闭弹窗，重新渲染弹窗内容以反映状态
+  const versions = overrides[path] || [];
+  openOverrideVersionModal(path, versions);
+  renderOverrides();
+}
+
+async function selectOverrideVersion(path, versionId) {
+  // 保持兼容性，但改用 toggle 逻辑
+  await toggleOverrideVersionInModal(path, versionId, true);
 }
 
 // 在弹窗中删除版本
