@@ -160,6 +160,21 @@
         <h3>临时修改列表 <span id="overrideCount">(0)</span></h3>
         <div id="overrideList"></div>
       </div>
+      <div class="override-list">
+        <h3>浏览器缓存与备份</h3>
+        <div class="section-content">
+          <button class="btn btn-sm btn-info" id="syncStatusBtn" onclick="syncToLocalStorage()">保存当前配置到浏览器</button>
+          <button class="btn btn-sm btn-secondary" onclick="restoreFromLocalStorage()">从浏览器恢复上次备份</button>
+          <div style="border-left:1px solid #ddd;padding-left:15px;margin-left:10px;display:flex;gap:10px;align-items:center">
+             <button class="btn btn-sm btn-primary" onclick="exportConfig()">导出为本地文件 (.json)</button>
+             <button class="btn btn-sm btn-secondary" onclick="document.getElementById('importFile').click()">导入配置文件</button>
+             <input type="file" id="importFile" style="display:none" accept=".json" onchange="importConfig(this)">
+          </div>
+          <p style="width:100%;margin:5px 0 0;color:#666;font-size:11px">
+            * 将当前的所有 URL 映射、文件夹映射及延迟规则保存到浏览器的本地存储 (LocalStorage) 中，或导出为文件备份。
+          </p>
+        </div>
+      </div>
       <div class="override-list" style="margin-top:20px">
         <h3>URL映射列表 <span id="mappingCount">(0)</span> <button class="btn btn-sm btn-success" onclick="openMappingModal('')" style="margin-left:10px">添加映射</button></h3>
         <div id="mappingList"></div>

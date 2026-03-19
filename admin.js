@@ -30,6 +30,160 @@ function hasOverride(path) {
   return versions && Array.isArray(versions) && versions.length > 0;
 }
 
+// ========== 浏览器存储与持久化 (Backup & Restore) ==========
+
+// 导出配置为文件
+function exportConfig() {
+  const data = {
+    urlMappings: mappings,
+    folderMappings: folderMappings,
+    localFolders: localFolders,
+    globalServers: globalServers,
+    pathDelays: pathDelays,
+    overrides: overrides,
+    exportTime: new Date().toISOString()
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'api-dispatcher-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// 导入配置文件并更新服务器
+async function importConfig(inputOrFile) {
+  let file;
+  if (inputOrFile.files) {
+    file = inputOrFile.files[0];
+  } else if (inputOrFile instanceof File || inputOrFile instanceof Blob) {
+    file = inputOrFile;
+  }
+  
+  if (!file) return;
+
+  const confirmed = await showConfirm('这将覆盖当前服务器上的所有映射和修改规则，确定继续？', '导入配置');
+  if (!confirmed) {
+    if (inputOrFile.value !== undefined) inputOrFile.value = '';
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      const tasks = [];
+      
+      if (data.urlMappings) tasks.push(fetch('/admin/mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data.urlMappings) }));
+      if (data.folderMappings) tasks.push(fetch('/admin/folder-mappings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data.folderMappings) }));
+      if (data.localFolders) tasks.push(fetch('/admin/local-folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data.localFolders) }));
+      if (data.globalServers) tasks.push(fetch('/admin/global-servers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data.globalServers) }));
+      if (data.pathDelays) {
+        for (const [p, pd] of Object.entries(data.pathDelays)) {
+          tasks.push(fetch('/admin/path-delays', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: p, delay: pd.delay, enabled: pd.enabled }) }));
+        }
+      }
+      if (data.overrides) {
+        tasks.push(fetch('/admin/overrides/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data.overrides) }));
+      }
+
+      await Promise.all(tasks);
+      alert('导入成功，配置已同步至服务器。即将自动刷新。');
+      location.reload();
+    } catch (err) {
+      alert('配置文件解析失败: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+// 同步到 LocalStorage (备份)
+function syncToLocalStorage() {
+  const data = {
+    urlMappings: mappings,
+    folderMappings: folderMappings,
+    localFolders: localFolders,
+    globalServers: globalServers,
+    pathDelays: pathDelays,
+    overrides: overrides,
+    syncTime: Date.now()
+  };
+  try {
+    localStorage.setItem('api_dispatcher_backup', JSON.stringify(data));
+    const btn = document.getElementById('syncStatusBtn');
+    if (btn) {
+      btn.textContent = '已保存到浏览器 (' + new Date().toLocaleTimeString() + ')';
+      btn.className = 'btn btn-sm btn-success';
+    }
+  } catch (e) {
+    alert('保存到浏览器失败 (可能数据量过大): ' + e.message);
+  }
+}
+
+// 从备份恢复
+async function restoreFromLocalStorage() {
+  const saved = localStorage.getItem('api_dispatcher_backup');
+  if (!saved) {
+    alert('未发现浏览器备份数据。');
+    return;
+  }
+  const data = JSON.parse(saved);
+  const time = new Date(data.syncTime).toLocaleString();
+  const confirmed = await showConfirm('确认从浏览器缓存中恢复？ (备份时间: ' + time + ')', '确认恢复');
+  if (confirmed) {
+     const blob = new Blob([saved], { type: 'application/json' });
+     const file = new File([blob], 'backup.json');
+     importConfig(file);
+  }
+}
+
+// ========== HAR IndexedDB 持久化 ==========
+const HAR_DB_NAME = 'APIDispatcherHAR';
+const HAR_DB_STORE = 'entries';
+
+function initHarDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(HAR_DB_NAME, 1);
+    request.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(HAR_DB_STORE)) {
+        db.createObjectStore(HAR_DB_STORE, { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = e => resolve(e.target.result);
+    request.onerror = e => reject(e.target.error);
+  });
+}
+
+async function saveHarEntriesToBrowser() {
+  if (!entries || entries.length === 0) return;
+  const db = await initHarDB();
+  const tx = db.transaction(HAR_DB_STORE, 'readwrite');
+  const store = tx.objectStore(HAR_DB_STORE);
+  store.clear();
+  entries.forEach(entry => store.add(entry));
+}
+
+async function loadHarEntriesFromBrowser() {
+  try {
+    const db = await initHarDB();
+    const tx = db.transaction(HAR_DB_STORE, 'readonly');
+    const store = tx.objectStore(HAR_DB_STORE);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      if (request.result && request.result.length > 0) {
+        entries = request.result;
+        document.getElementById('harContent').classList.remove('hidden');
+        renderHar();
+      }
+    };
+  } catch (e) {}
+}
+
+// 自动尝试加载上次 HAR 数据
+loadHarEntriesFromBrowser();
+
 // 初始化
 fetch('/admin/server-info').then(r => r.json()).then(d => {
   document.getElementById('serverAddrs').innerHTML = d.addresses.map(a =>
@@ -3083,6 +3237,7 @@ function loadHarFile(file) {
       uploadArea.innerHTML = '<p>已加载: ' + file.name + ' (' + entries.length + ' 条)</p>';
       document.getElementById('totalCount').textContent = entries.length;
       applyFilters();
+      saveHarEntriesToBrowser();
     } catch (err) { alert('解析失败: ' + err.message); }
   };
   reader.readAsText(file);
