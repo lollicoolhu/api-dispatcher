@@ -90,17 +90,29 @@ async function updateDataRootManual() {
   }
 }
 
-// ========== 数据目录选择器 (系统级) ==========
-async function selectSystemFolder() {
+// ========== 数据目录选择器 (通用) ==========
+async function openDirectoryPicker() {
   const res = await fetch('/admin/system/select-folder', { method: 'POST' });
   const result = await res.json();
-
   if (result.success && result.path) {
-    if (confirm('确定将存储目录切换至：\n' + result.path + ' ?')) {
+    return result.path;
+  } else if (result.error) {
+    if (result.error !== '用户取消选择或发生系统错误') {
+      alert('选择失败: ' + result.error);
+    }
+  }
+  return null;
+}
+
+// ========== 数据目录选择器 (系统级 - 切换主数据根目录) ==========
+async function selectSystemFolder() {
+  const path = await openDirectoryPicker();
+  if (path) {
+    if (confirm('确定将存储目录切换至：\n' + path + ' ?')) {
       const saveRes = await fetch('/admin/master-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ externalFolderPath: result.path })
+        body: JSON.stringify({ externalFolderPath: path })
       });
       const saveResult = await saveRes.json();
       if (saveResult.success) {
@@ -108,13 +120,50 @@ async function selectSystemFolder() {
         location.reload();
       } else {
         alert('切换失败: ' + saveResult.error);
+        loadMasterConfig();
       }
-    }
-  } else if (result.error) {
-    if (result.error !== '用户取消选择或发生系统错误') {
-      alert('选择失败: ' + result.error);
+    } else {
+      loadMasterConfig();
     }
   }
+}
+
+// ========== 各页面独立的文件夹选择函数 ==========
+async function chooseServerFolder() {
+  const path = await openDirectoryPicker();
+  if (path) {
+    document.getElementById('serverFolderInput').value = path;
+  }
+}
+
+async function chooseOutputFolder() {
+  const path = await openDirectoryPicker();
+  if (path) {
+    document.getElementById('outputFolderInput').value = path;
+  }
+}
+
+async function chooseLocalFolderInModal() {
+  const path = await openDirectoryPicker();
+  if (path) {
+    document.getElementById('localFolderInput').value = path;
+  }
+}
+
+// 辅助逻辑：当输入框变化时触发解析
+async function parseSelectedServerInput(silent = false) {
+  const folder = document.getElementById('serverFolderInput').value.trim();
+  if (!folder) return;
+  currentParseFolder = folder;
+  
+  const res = await fetch('/admin/files?folder=' + encodeURIComponent(folder));
+  const data = await res.json();
+  if (data.error) {
+    if (!silent) alert('解析失败: ' + data.error);
+    return;
+  }
+  localFiles = data.files || [];
+  renderFileList();
 }
 
 // 加载文件夹列表
@@ -123,27 +172,13 @@ async function loadPublicFolders(currentFolder) {
   const data = await res.json();
   publicFolders = data.folders || [];
 
-  // 更新 HAR 解析页面的输出文件夹下拉框
-  const harSelect = document.getElementById('outputFolder');
-  if (harSelect) {
-    harSelect.innerHTML = publicFolders.map(f =>
-      '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
-    ).join('');
-    if (publicFolders.length === 0) {
-      harSelect.innerHTML = '<option value="mock">mock</option>';
-    }
+  // 更新 HAR 解析页面的输出文件夹
+  const harInput = document.getElementById('outputFolderInput');
+  if (harInput && !harInput.value) {
+    harInput.value = publicFolders.length > 0 ? publicFolders[0].path : 'mock';
   }
 
-  // 更新服务器页面的文件夹下拉框
-  const serverSelect = document.getElementById('serverFolderSelect');
-  if (serverSelect) {
-    serverSelect.innerHTML = publicFolders.map(f =>
-      '<option value="' + f.path + '"' + (f.path === currentFolder ? ' selected' : '') + '>' + f.name + '</option>'
-    ).join('');
-    if (publicFolders.length === 0) {
-      serverSelect.innerHTML = '<option value="">无可用服务器</option>';
-    }
-  }
+  // 不再打开页面就自动填充路径和解析，等待用户手动操作
 }
 
 // ========== 本地文件夹管理 ==========
@@ -201,14 +236,18 @@ function renderLocalFolders() {
       unreachableLabel = '同优先级(' + priority + ')已有其他文件夹';
     }
 
-    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+    return '<div class="item-row' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
       '<input type="checkbox" ' + (f.enabled ? 'checked' : '') + ' onchange="toggleLocalFolderEnabled(\'' + folderPath.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-      '<span class="path">' + folderPath + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-      remarkHtml +
-      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-      (f.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + f.delay + 'ms</span>' : '') +
-      '<button class="btn btn-sm btn-info" onclick="openLocalFolderModal(\'' + folderPath.replace(/'/g, "\\'") + '\')">编辑</button>' +
-      '<button class="btn btn-sm btn-danger" onclick="removeLocalFolder(\'' + folderPath.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<span class="path">' + folderPath + (unreachable ? ' <span style="color:#dc3545;font-size:10px;margin-left:5px">[' + unreachableLabel + ']</span>' : '') + '</span>' +
+      '<div class="info-group">' +
+        remarkHtml +
+        '<span class="badge-info">优先级: ' + priority + '</span>' +
+        (f.delay ? '<span class="badge-info badge-delay">延迟: ' + f.delay + 'ms</span>' : '') +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-sm btn-info" onclick="openLocalFolderModal(\'' + folderPath.replace(/'/g, "\\'") + '\')">编辑</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="removeLocalFolder(\'' + folderPath.replace(/'/g, "\\'") + '\')">删除</button>' +
+      '</div></div>';
   }).join('');
 }
 
@@ -228,12 +267,8 @@ async function removeLocalFolder(folderPath) {
   renderFolderMappings();
 }
 
-function openLocalFolderModal(folderPath) {
-  const select = document.getElementById('localFolderSelect');
-  select.innerHTML = publicFolders.map(f =>
-    '<option value="' + f.path + '"' + (f.path === folderPath ? ' selected' : '') + '>' + f.name + ' (' + f.path + ')</option>'
-  ).join('');
-
+function openLocalFolderModal(folderPath = '') {
+  document.getElementById('localFolderInput').value = folderPath;
   const f = localFolders[folderPath] || {};
   document.getElementById('localFolderPriority').value = f.priority ?? 0;
   document.getElementById('localFolderDelay').value = f.delay ?? 0;
@@ -246,7 +281,11 @@ function closeLocalFolderModal() {
 }
 
 async function saveLocalFolderFromModal() {
-  const folderPath = document.getElementById('localFolderSelect').value;
+  const folderPath = document.getElementById('localFolderInput').value.trim();
+  if (!folderPath) {
+    alert('请选择或输入文件夹路径');
+    return;
+  }
   const priority = parseInt(document.getElementById('localFolderPriority').value) || 0;
   const delay = parseInt(document.getElementById('localFolderDelay').value) || 0;
   const remark = document.getElementById('localFolderRemark').value.trim();
@@ -265,8 +304,22 @@ async function saveLocalFolderFromModal() {
 function showTab(name) {
   document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelector('.tabs .tab[onclick*="' + name + '"]').classList.add('active');
-  document.getElementById(name).classList.add('active');
+  
+  // 查找对应的 Tab 按钮或下拉项
+  const tabBtn = document.querySelector('.tab[onclick*="\'' + name + '\'"]');
+  const dropdownItem = document.querySelector('.dropdown-item[onclick*="\'' + name + '\'"]');
+  
+  if (tabBtn) {
+    tabBtn.classList.add('active');
+  } else if (dropdownItem) {
+    // 如果是下拉项，激活它的父级切换按钮
+    const toggle = document.getElementById('toolsToggle');
+    if (toggle) toggle.classList.add('active');
+  }
+  
+  const panel = document.getElementById(name);
+  if (panel) panel.classList.add('active');
+
   if (name === 'logs') { refreshLogs(); startAutoRefresh(); }
   else { stopAutoRefresh(); }
 }
@@ -341,14 +394,18 @@ function renderGlobalServers() {
     const remarkHtml = s.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(s.remark) + '">' + escapeHtml(s.remark) + '</span>' : '';
     const unreachableLabel = blockedBySamePriority ? '同优先级(' + priority + ')已有其他服务器' : '';
 
-    return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+    return '<div class="item-row' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
       '<input type="checkbox" ' + (s.enabled ? 'checked' : '') + ' onchange="toggleGlobalServerEnabled(\'' + url.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
-      '<span class="path">' + url + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-      remarkHtml +
-      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-      (s.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + s.delay + 'ms</span>' : '') +
-      '<button class="btn btn-sm btn-info" onclick="openGlobalServerModal(\'' + url.replace(/'/g, "\\'") + '\')">编辑</button>' +
-      '<button class="btn btn-sm btn-danger" onclick="removeGlobalServer(\'' + url.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<span class="path">' + url + (unreachable ? ' <span style="color:#dc3545;font-size:10px;margin-left:5px">[' + unreachableLabel + ']</span>' : '') + '</span>' +
+      '<div class="info-group">' +
+        remarkHtml +
+        '<span class="badge-info">优先级: ' + priority + '</span>' +
+        (s.delay ? '<span class="badge-info badge-delay">延迟: ' + s.delay + 'ms</span>' : '') +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-sm btn-info" onclick="openGlobalServerModal(\'' + url.replace(/'/g, "\\'") + '\')">编辑</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="removeGlobalServer(\'' + url.replace(/'/g, "\\'") + '\')">删除</button>' +
+      '</div></div>';
   }).join('');
 }
 
@@ -441,18 +498,28 @@ function renderPathDelays() {
   list.innerHTML = paths.map(p => {
     const pd = pathDelays[p];
     const disabled = !pd.enabled;
-    return '<div class="path-delay-item' + (disabled ? ' disabled' : '') + '">' +
-      '<div class="delay-badge">' + pd.delay + '<span class="ms">ms</span></div>' +
-      '<div class="path-info">' +
-        '<div class="path-url">' + p + '</div>' +
-        '<div class="path-status">' + (disabled ? '<span class="status-off">已禁用</span>' : '<span class="status-on">生效中</span>') + '</div>' +
+    return '<div class="item-row' + (disabled ? ' disabled' : '') + '">' +
+      '<input type="checkbox" ' + (pd.enabled ? 'checked' : '') + ' onchange="togglePathDelayEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
+      '<span class="path">' + p + '</span>' +
+      '<div class="info-group">' +
+        '<span class="badge-info badge-delay">延迟: ' + pd.delay + 'ms</span>' +
       '</div>' +
-      '<div class="item-actions">' +
+      '<div class="actions">' +
         '<button class="btn btn-sm btn-info" onclick="openPathDelayModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-        '<button class="btn btn-sm btn-danger" onclick="deletePathDelay(\'' + p.replace(/'/g, "\\'") + '\')" style="margin-left:8px">删除</button>' +
-      '</div>' +
-    '</div>';
+        '<button class="btn btn-sm btn-danger" onclick="deletePathDelay(\'' + p.replace(/'/g, "\\'") + '\')">删除</button>' +
+      '</div></div>';
   }).join('');
+}
+
+async function togglePathDelayEnabled(path, enabled) {
+  const pd = pathDelays[path];
+  await fetch('/admin/path-delays', { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify({ path, delay: pd.delay, enabled }) 
+  });
+  pd.enabled = enabled;
+  renderPathDelays();
 }
 
 function openPathDelayModal(path = '') {
@@ -593,12 +660,16 @@ function renderMappings() {
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
       '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
       '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
-      '<span class="target">→ ' + m.target + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-      remarkHtml +
-      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-      (m.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + m.delay + 'ms</span>' : '') +
-      '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-      '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<span class="target">→ ' + m.target + (unreachable ? ' <span style="color:#dc3545;font-size:10px;margin-left:5px">[' + unreachableLabel + ']</span>' : '') + '</span>' +
+      '<div class="info-group">' +
+        remarkHtml +
+        '<span class="badge-info">优先级: ' + priority + '</span>' +
+        (m.delay ? '<span class="badge-info badge-delay">延迟: ' + m.delay + 'ms</span>' : '') +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-sm btn-info" onclick="openMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="removeMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button>' +
+      '</div></div>';
   }).join('');
 }
 
@@ -842,12 +913,16 @@ function renderFolderMappings() {
     return '<div class="mapping-item' + (disabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
       '<input type="checkbox" ' + (m.enabled ? 'checked' : '') + ' onchange="toggleFolderMappingEnabled(\'' + p.replace(/'/g, "\\'") + '\', this.checked)" title="启用/禁用">' +
       '<span class="path">' + p + (isWildcard ? ' <span style="color:#17a2b8;font-size:10px">(前缀)</span>' : '') + '</span>' +
-      '<span class="target">→ ' + m.folder + (unreachable ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') + '</span>' +
-      remarkHtml +
-      '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-      (m.delay ? '<span style="font-size:10px;color:#d97706;padding:0 8px">延迟: ' + m.delay + 'ms</span>' : '') +
-      '<button class="btn btn-sm btn-info" onclick="openFolderMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-      '<button class="btn btn-sm btn-danger" onclick="removeFolderMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button></div>';
+      '<span class="target">→ ' + m.folder + (unreachable ? ' <span style="color:#dc3545;font-size:10px;margin-left:5px">[' + unreachableLabel + ']</span>' : '') + '</span>' +
+      '<div class="info-group">' +
+        remarkHtml +
+        '<span class="badge-info">优先级: ' + priority + '</span>' +
+        (m.delay ? '<span class="badge-info badge-delay">延迟: ' + m.delay + 'ms</span>' : '') +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-sm btn-info" onclick="openFolderMappingModal(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="removeFolderMapping(\'' + p.replace(/'/g, "\\'") + '\')">删除</button>' +
+      '</div></div>';
   }).join('');
 }
 
@@ -1198,7 +1273,7 @@ async function loadOverrides(autoRender = true) {
 
 // 辅助函数：格式化条件摘要显示
 function formatOverrideConditions(v) {
-  if (!v.conditions || v.conditions.length === 0) return '<span style="color:#999">默认(无条件)</span>';
+  if (!v.conditions || v.conditions.length === 0) return '';
   const opMap = { eq: '=', contains: '≈', exists: '⚡', neq: '≠' };
   const logicText = v.conditionLogic === 'or' ? ' | ' : ' & ';
   
@@ -1223,82 +1298,98 @@ function renderOverrides() {
     totalVersions += (overrides[p] || []).length;
   });
 
-  document.getElementById('overrideCount').textContent = '(' + paths.length + ' 接口, ' + totalVersions + ' 规则)';
+  document.getElementById('overrideCount').textContent = '';
   if (paths.length === 0) { list.innerHTML = '<em>无临时修改</em>'; return; }
 
   list.innerHTML = paths.sort().map(p => {
     const versions = overrides[p] || [];
     if (versions.length === 0) return '';
     
-    // 如果只有一条规则，则平铺展示，不使用折叠
-    if (versions.length === 1) {
-      const v = versions[0];
-      const priority = v.priority ?? 1;
-      let jsonInvalid = false;
-      if (isJsonPath(p)) {
-        try { JSON.parse(v.content || ''); } catch { jsonInvalid = true; }
-      }
+    // 计算唯一的条件集数量
+    const condSets = new Set();
+    versions.forEach(v => {
+      const s = (v.conditions || []).map(c => `${c.type}:${c.key}:${c.op}:${c.value}`).sort().join('|') + (v.conditionLogic || 'and');
+      condSets.add(s);
+    });
 
-      const blockingPriorities = [];
-      Object.values(localFolders).forEach(lf => { if (lf.enabled) blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 }); });
-      Object.values(globalServers).forEach(gs => { if (gs.enabled) blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 }); });
-      if (mappings[p] && mappings[p].enabled) {
-        const mappingPriority = mappings[p].priority ?? 1;
-        if (mappingPriority > priority) blockingPriorities.push({ type: 'URL映射', priority: mappingPriority });
-      }
-      Object.keys(folderMappings).forEach(pattern => {
-        const fm = folderMappings[pattern];
-        if (fm.enabled) {
-          let matched = false;
-          if (pattern.endsWith('*')) matched = p.startsWith(pattern.slice(0, -1));
-          else matched = p === pattern || p.startsWith(pattern + '/');
-          if (matched) {
-            const fmPriority = fm.priority ?? 1;
-            if (fmPriority > priority) blockingPriorities.push({ type: '文件夹映射', priority: fmPriority });
+    // 如果所有版本的规则条件完全一致（或者只有一条规则），则不折叠，直接铺开
+    if (condSets.size <= 1) {
+      return versions.map((v, idx) => {
+        const priority = v.priority ?? 1;
+        let jsonInvalid = false;
+        if (isJsonPath(p)) {
+          try { JSON.parse(v.content || ''); } catch { jsonInvalid = true; }
+        }
+
+        const blockingPriorities = [];
+        Object.values(localFolders).forEach(lf => { if (lf.enabled) blockingPriorities.push({ type: '本地文件夹', priority: lf.priority ?? 0 }); });
+        Object.values(globalServers).forEach(gs => { if (gs.enabled) blockingPriorities.push({ type: '全局服务器', priority: gs.priority ?? 100 }); });
+        if (mappings[p] && mappings[p].enabled) {
+          const mappingPriority = mappings[p].priority ?? 1;
+          if (mappingPriority > priority) blockingPriorities.push({ type: 'URL映射', priority: mappingPriority });
+        }
+        Object.keys(folderMappings).forEach(pattern => {
+          const fm = folderMappings[pattern];
+          if (fm.enabled) {
+            let matched = false;
+            if (pattern.endsWith('*')) matched = p.startsWith(pattern.slice(0, -1));
+            else matched = p === pattern || p.startsWith(pattern + '/');
+            if (matched) {
+              const fmPriority = fm.priority ?? 1;
+              if (fmPriority > priority) blockingPriorities.push({ type: '文件夹映射', priority: fmPriority });
+            }
+          }
+        });
+
+        let blockedBy = null;
+        if (v.enabled && !jsonInvalid) {
+          for (const bp of blockingPriorities) {
+            if (priority < bp.priority) {
+              if (!blockedBy || bp.priority > blockedBy.priority) blockedBy = bp;
+            }
           }
         }
-      });
 
-      let blockedBy = null;
-      if (v.enabled && !jsonInvalid) {
-        for (const bp of blockingPriorities) {
-          if (priority < bp.priority) {
-            if (!blockedBy || bp.priority > blockedBy.priority) blockedBy = bp;
-          }
-        }
-      }
+        const unreachable = jsonInvalid || blockedBy;
+        const remarkHtml = v.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(v.remark) + '">' + escapeHtml(v.remark) + '</span>' : '';
+        let unreachableLabel = '';
+        if (jsonInvalid) unreachableLabel = 'JSON无效';
+        else if (blockedBy) unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
 
-      const unreachable = jsonInvalid || blockedBy;
-      const remarkHtml = v.remark ? '<span class="remark-tag" data-remark="' + escapeHtml(v.remark) + '">' + escapeHtml(v.remark) + '</span>' : '';
-      let unreachableLabel = '';
-      if (jsonInvalid) unreachableLabel = 'JSON无效';
-      else if (blockedBy) unreachableLabel = '<' + blockedBy.type + '(' + blockedBy.priority + ')';
+        const conditionHtml = formatOverrideConditions(v);
 
-      const conditionHtml = formatOverrideConditions(v);
-
-      return '<div class="override-item' + (!v.enabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
-        '<input type="checkbox" ' + (v.enabled ? 'checked' : '') + ' onchange="toggleOverrideVersionEnabled(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\', this.checked)" title="启用/禁用此规则">' +
-        '<span class="path" title="' + escapeHtml(p) + '">' + p + '</span>' +
-        conditionHtml +
-        remarkHtml +
-        '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-        '<button class="btn btn-sm btn-primary" onclick="editOverride(\'' + p.replace(/'/g, "\\'") + '\')">编辑</button>' +
-        '<button class="btn btn-sm btn-danger" onclick="removeOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除规则</button></div>';
+        return '<div class="override-item' + (!v.enabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '">' +
+          '<input type="checkbox" ' + (v.enabled ? 'checked' : '') + ' onchange="toggleOverrideVersionEnabled(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\', this.checked)" title="启用/禁用此规则">' +
+          '<span class="path" title="' + escapeHtml(p) + '">' + p + (versions.length > 1 ? ' <span style="font-size:10px;color:#999;font-family:sans-serif">#' + (idx + 1) + '</span>' : '') + '</span>' +
+          conditionHtml +
+          (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px;margin-left:5px">[' + unreachableLabel + ']</span>' : '') +
+          '<div class="info-group">' +
+            remarkHtml +
+            '<span class="badge-info">优先级: ' + priority + '</span>' +
+            (v.delay ? '<span class="badge-info badge-delay">延迟: ' + v.delay + 'ms</span>' : '') +
+          '</div>' +
+          '<div class="actions">' +
+            '<button class="btn btn-sm btn-info" onclick="editOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">编辑</button>' +
+            '<button class="btn btn-sm btn-danger" onclick="removeOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除</button>' +
+          '</div></div>';
+      }).join('');
     }
 
-    // 多条规则，使用折叠展示
+    // 存在不同规则条件的版本，使用折叠展示
     const expanded = expandedOverrides.has(p);
     const enabledCount = versions.filter(v => v.enabled).length;
     
     let headerHtml = '<div class="group-header" onclick="toggleOverrideGroup(\'' + p.replace(/'/g, "\\'") + '\')">' +
       '<span class="arrow ' + (expanded ? 'expanded' : '') + '">▶</span>' +
       '<span class="path" title="' + escapeHtml(p) + '">' + p + '</span>' +
-      (enabledCount > 0 ? '<span class="badge badge-override" style="margin-left:8px;font-size:10px">已启用(' + enabledCount + ')</span>' : '<span style="color:#999;font-size:10px;margin-left:8px">未启用</span>') +
-      '<span class="badge badge-count" style="margin-left:8px">' + versions.length + ' 规则</span>' +
-      '<div style="flex:1"></div>' +
-      '<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); editOverride(\'' + p.replace(/'/g, "\\'") + '\')">管理</button>' +
-      '<button class="btn btn-sm btn-danger" style="margin-left:8px" onclick="event.stopPropagation(); removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">清空</button>' +
-      '</div>';
+      '<div class="info-group">' +
+        (enabledCount > 0 ? '<span class="badge-info badge-override">已启用(' + enabledCount + ')</span>' : '<span class="badge-info">未启用</span>') +
+        '<span class="badge-info">' + versions.length + ' 规则</span>' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn btn-sm btn-info" onclick="event.stopPropagation(); editOverride(\'' + p.replace(/'/g, "\\'") + '\')">管理</button>' +
+        '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); removeOverride(\'' + p.replace(/'/g, "\\'") + '\')">清空</button>' +
+      '</div></div>';
 
     let itemsHtml = '<div class="group-items ' + (expanded ? 'expanded' : '') + '">';
     itemsHtml += versions.map((v, idx) => {
@@ -1345,16 +1436,20 @@ function renderOverrides() {
 
       const conditionHtml = formatOverrideConditions(v);
 
-      return '<div class="override-item' + (!v.enabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '" style="margin-left: 15px; border-left: 2px solid #ddd; padding-left: 10px;">' +
+      return '<div class="override-item' + (!v.enabled ? ' disabled' : '') + (unreachable ? ' unreachable' : '') + '" style="border-left: 3px solid #ffc107;">' +
         '<input type="checkbox" ' + (v.enabled ? 'checked' : '') + ' onchange="toggleOverrideVersionEnabled(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\', this.checked)" title="启用/禁用此规则">' +
-        '<span class="path" style="font-size: 11px; color: #555; flex: 0 0 auto; width: 35px;"># ' + (idx + 1) + '</span>' +
+        '<span class="path" style="min-width: 30px; flex: 0 0 auto;"># ' + (idx + 1) + '</span>' +
         conditionHtml +
-        (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px">' + unreachableLabel + '</span>' : '') +
-        remarkHtml +
-        '<span style="font-size:10px;color:#666;padding:0 8px">优先级: ' + priority + '</span>' +
-        '<div style="flex:1"></div>' +
-        '<button class="btn btn-sm" style="padding: 2px 6px; font-size: 10px;" onclick="editOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">编辑内容</button>' +
-        '<button class="btn btn-sm btn-danger" style="padding: 2px 6px; font-size: 10px; margin-left: 5px;" onclick="removeOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除规则</button></div>';
+        (unreachableLabel ? ' <span style="color:#dc3545;font-size:10px;margin-left:5px">[' + unreachableLabel + ']</span>' : '') +
+        '<div class="info-group">' +
+          remarkHtml +
+          '<span class="badge-info">优先级: ' + priority + '</span>' +
+          (v.delay ? '<span class="badge-info badge-delay">延迟: ' + v.delay + 'ms</span>' : '') +
+        '</div>' +
+        '<div class="actions">' +
+          '<button class="btn btn-sm btn-info" onclick="editOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">编辑</button>' +
+          '<button class="btn btn-sm btn-danger" onclick="removeOverrideVersion(\'' + p.replace(/'/g, "\\'") + '\', \'' + v.id + '\')">删除</button>' +
+        '</div></div>';
     }).join('');
     itemsHtml += '</div>';
 
@@ -1369,6 +1464,23 @@ function toggleOverrideGroup(path) {
 }
 
 async function toggleOverrideVersionEnabled(path, versionId, enabled) {
+  if (enabled) {
+    const versions = overrides[path] || [];
+    const target = versions.find(v => v.id === versionId);
+    if (target) {
+      // 开启新规则时，自动关闭同一个路径下、条件完全一样的其他已开启规则
+      for (const v of versions) {
+        if (v.id !== versionId && v.enabled && isConditionsEqual(v.conditions, target.conditions, v.conditionLogic, target.conditionLogic)) {
+          await fetch('/admin/overrides', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify({ path, versionId: v.id, enabled: false }) 
+          });
+        }
+      }
+    }
+  }
+
   await fetch('/admin/overrides', { 
     method: 'POST', 
     headers: { 'Content-Type': 'application/json' }, 
@@ -1846,17 +1958,16 @@ async function refreshServerList() {
 }
 
 async function parseSelectedServer() {
-  const folder = document.getElementById('serverFolderSelect').value;
-  if (!folder) return;
-  currentParseFolder = folder;
-  const res = await fetch('/admin/files?folder=' + encodeURIComponent(folder));
-  const data = await res.json();
-  if (data.error) { alert(data.error); return; }
-  localFiles = data.files || [];
+  await parseSelectedServerInput();
+}
+
+function renderFileList() {
+  const list = document.getElementById('fileList');
   document.getElementById('fileCount').textContent = localFiles.length;
-  document.getElementById('parseFolderInfo').textContent = '当前: ' + folder;
-  document.getElementById('fileDetailPanel').classList.remove('active');
-  activeFilePath = null;
+  if (localFiles.length === 0) {
+    list.innerHTML = '<em>此目录下没有 JSON 文件</em>';
+    return;
+  }
   filterFiles();
 }
 
@@ -1927,6 +2038,17 @@ function formatSize(b) {
 function formatDuration(ms) {
   if (ms < 1000) return ms + 'ms';
   return (ms / 1000).toFixed(1) + 's';
+}
+
+function isConditionsEqual(c1, c2, l1, l2) {
+  const cond1 = Array.isArray(c1) ? c1 : [];
+  const cond2 = Array.isArray(c2) ? c2 : [];
+  if (cond1.length !== cond2.length) return false;
+  if (cond1.length === 0) return true;
+  if (cond1.length > 1 && (l1 || 'and') !== (l2 || 'and')) return false;
+  const s1 = cond1.map(c => `${c.type}:${c.key}:${c.op}:${c.value}`).sort().join('|');
+  const s2 = cond2.map(c => `${c.type}:${c.key}:${c.op}:${c.value}`).sort().join('|');
+  return s1 === s2;
 }
 
 // 判断 content-type 是否可以直接展示
@@ -3102,7 +3224,7 @@ function showDetail(id) {
 }
 
 function getSelectedFiles() {
-  const folder = document.getElementById('outputFolder').value || 'mock';
+  const folder = document.getElementById('outputFolderInput').value || 'mock';
   const keepLast = document.getElementById('keepLast').checked;
   const pretty = document.getElementById('prettyJson').checked;
   const selected = entries.filter(e => selectedIds.has(e.id));
@@ -3135,8 +3257,8 @@ let logBatchActiveLog = null;
 function openLogBatchSave() {
   // 填充文件夹下拉框
   const folderSelect = document.getElementById('logBatchFolder');
-  const serverFolderSelect = document.getElementById('serverFolderSelect');
-  const currentFolder = serverFolderSelect ? serverFolderSelect.value : 'mock';
+  const serverFolderInput = document.getElementById('serverFolderInput');
+  const currentFolder = serverFolderInput ? serverFolderInput.value : 'mock';
 
   // 移除 public/ 前缀显示
   const currentFolderName = currentFolder.replace(/^public\//, '');

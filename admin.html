@@ -91,12 +91,19 @@
 </head>
 <body>
   <div class="container">
-    <h1>服务器管理</h1>
-    <div class="tabs">
-      <button class="tab active" onclick="showTab('settings')">设置</button>
-      <button class="tab" onclick="showTab('files')">服务器</button>
-      <button class="tab" onclick="showTab('har')">HAR 解析</button>
-      <button class="tab" onclick="showTab('logs')">访问日志</button>
+    <div class="main-header">
+      <div class="tabs">
+        <button class="tab active" onclick="showTab('settings')">设置</button>
+        <button class="tab" onclick="showTab('logs')">访问日志</button>
+        <div class="dropdown">
+          <button class="tab dropdown-toggle" id="toolsToggle">解析工具 <span class="arrow">▼</span></button>
+          <div class="dropdown-content">
+            <button class="dropdown-item" onclick="showTab('files')">服务器文件</button>
+            <button class="dropdown-item" onclick="showTab('har')">HAR 日志解析</button>
+          </div>
+        </div>
+      </div>
+      <h1>服务器管理</h1>
     </div>
 
     <div id="settings" class="panel active">
@@ -105,11 +112,11 @@
       </div>
       <div class="override-list">
         <h3>数据存储配置</h3>
-        <div style="display:flex;flex-direction:column;gap:12px;padding:15px;background:#fff;border:1px solid #eee;border-radius:8px">
+        <div class="section-content" style="flex-direction:column;align-items:flex-start">
           <div style="font-size:12px;color:#666;margin-bottom:5px">
             配置和 Mock 数据的存储单位。所有配置都将持久化到此目录下。
           </div>
-          <div style="display:flex;align-items:center;gap:15px;padding:10px;background:#f8f9fa;border-radius:6px;border:1px dashed #ddd">
+          <div style="display:flex;align-items:center;gap:15px;padding:10px;background:#f8f9fa;border-radius:6px;border:1px dashed #ddd;width:100%">
             <div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
               <span style="font-size:11px;color:#999;display:block;margin-bottom:2px">当前全路径 (可点击切换或直接输入)</span>
               <input type="text" id="dataRootInput" style="width:100%;font-size:13px;color:#333;font-weight:600;padding:4px;border:none;background:transparent" spellcheck="false" onchange="updateDataRootManual()">
@@ -130,14 +137,14 @@
 
       <div class="override-list">
         <h3>HTTP 选项</h3>
-        <div style="display:flex;gap:20px;align-items:center;padding:10px;background:#f8f9fa;border-radius:4px;flex-wrap:wrap">
+        <div class="section-content">
           <label><input type="checkbox" id="cookieRewriteEnabled" checked onchange="updateCookieRewrite()"> 重写 Set-Cookie</label>
           <span style="color:#666;font-size:11px">(将 Domain 改为当前服务器，移除 Secure，设置 SameSite=Lax)</span>
         </div>
       </div>
       <div class="override-list">
         <h3>响应延时配置</h3>
-        <div style="display:flex;gap:20px;align-items:center;padding:10px;background:#f8f9fa;border-radius:4px;flex-wrap:wrap">
+        <div class="section-content">
           <label style="display:flex;align-items:center;gap:5px">
             <span style="font-size:12px">全局返回延迟:</span>
             <input type="number" id="globalDelayInput" value="0" min="0" step="100" style="width:80px;padding:3px 6px;font-size:12px" onchange="updateGlobalDelay()">
@@ -165,8 +172,12 @@
 
     <div id="files" class="panel">
       <div class="filters">
-        <label>选择服务器: <select id="serverFolderSelect" style="width:200px;padding:6px 10px" onchange="parseSelectedServer()"></select></label>
-        <button class="btn btn-sm btn-secondary" onclick="refreshServerList()">刷新</button>
+        <label style="display:flex;align-items:center;gap:10px">
+          选择服务器: 
+          <input type="text" id="serverFolderInput" style="width:250px;padding:6px 10px" placeholder="输入路径或选择文件夹">
+          <button class="btn btn-sm btn-info" onclick="chooseServerFolder()">选择文件夹</button>
+        </label>
+        <button class="btn btn-sm btn-secondary" onclick="parseSelectedServer()">解析</button>
         <input type="text" id="fileSearch" placeholder="搜索路径..." style="width:150px" oninput="filterFiles()">
       </div>
       <div class="stats"><span>文件数: <strong id="fileCount">0</strong></span><span id="parseFolderInfo"></span></div>
@@ -203,7 +214,11 @@
           <div class="list-panel">
             <div class="list-container" id="groupList"></div>
             <div class="output-config">
-              <label>输出: <select id="outputFolder" style="width:120px;padding:4px 8px"></select></label>
+              <label style="display:flex;align-items:center;gap:6px">
+                输出: 
+                <input type="text" id="outputFolderInput" style="width:150px;padding:4px 8px" placeholder="输出目录">
+                <button class="btn btn-sm btn-info" onclick="chooseOutputFolder()">选择</button>
+              </label>
               <label><input type="checkbox" id="keepLast" checked> 保留最后</label>
               <label><input type="checkbox" id="prettyJson" checked> 格式化</label>
               <button class="btn btn-success" onclick="saveToServer()">保存到服务器</button>
@@ -409,7 +424,10 @@
       <div class="modal-body">
         <div style="margin-bottom:15px">
           <label style="display:block;margin-bottom:5px">选择文件夹:</label>
-          <select id="localFolderSelect" style="width:100%;padding:6px 10px"></select>
+          <div style="display:flex;gap:10px">
+            <input type="text" id="localFolderInput" style="flex:1;padding:6px 10px" placeholder="输入路径或选择文件夹">
+            <button class="btn btn-sm btn-info" onclick="chooseLocalFolderInModal()">选择文件夹</button>
+          </div>
         </div>
         <div style="margin-bottom:15px;display:flex;gap:20px;align-items:center">
           <label>优先级: <input type="number" id="localFolderPriority" value="0" style="width:60px"></label>
