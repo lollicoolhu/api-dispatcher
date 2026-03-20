@@ -143,13 +143,6 @@ async function chooseOutputFolder() {
   }
 }
 
-async function chooseLocalFolderInModal() {
-  const path = await openDirectoryPicker();
-  if (path) {
-    document.getElementById('localFolderInput').value = path;
-  }
-}
-
 // 辅助逻辑：当输入框变化时触发解析
 async function parseSelectedServerInput(silent = false) {
   const folder = document.getElementById('serverFolderInput').value.trim();
@@ -268,7 +261,20 @@ async function removeLocalFolder(folderPath) {
 }
 
 function openLocalFolderModal(folderPath = '') {
-  document.getElementById('localFolderInput').value = folderPath;
+  const select = document.getElementById('localFolderInput');
+  
+  // 填充文件夹选项
+  select.innerHTML = '<option value="">-- 请选择文件夹 --</option>';
+  publicFolders.forEach(folder => {
+    const option = document.createElement('option');
+    option.value = folder.path;
+    option.textContent = folder.path;
+    if (folder.path === folderPath) {
+      option.selected = true;
+    }
+    select.appendChild(option);
+  });
+  
   const f = localFolders[folderPath] || {};
   document.getElementById('localFolderPriority').value = f.priority ?? 0;
   document.getElementById('localFolderDelay').value = f.delay ?? 0;
@@ -283,13 +289,12 @@ function closeLocalFolderModal() {
 async function saveLocalFolderFromModal() {
   const folderPath = document.getElementById('localFolderInput').value.trim();
   if (!folderPath) {
-    alert('请选择或输入文件夹路径');
+    alert('请选择文件夹');
     return;
   }
   const priority = parseInt(document.getElementById('localFolderPriority').value) || 0;
   const delay = parseInt(document.getElementById('localFolderDelay').value) || 0;
   const remark = document.getElementById('localFolderRemark').value.trim();
-  if (!folderPath) return alert('请选择文件夹');
   await fetch('/admin/local-folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath, enabled: true, priority, remark, delay }) });
   localFolders[folderPath] = { enabled: true, priority, remark, delay };
   renderLocalFolders();
@@ -1604,7 +1609,7 @@ function openOverrideVersionModal(path, versions) {
     const createdAt = new Date(v.createdAt).toLocaleString('zh-CN');
     const remarkText = v.remark ? escapeHtml(v.remark) : '';
     const versionKey = 'version_' + v.id;
-    const defaultExpanded = false; // 不再默认展开已启用的版本，全部折叠
+    const defaultExpanded = isEnabled; // 默认展开已启用的版本
 
     // 版本头部（可点击折叠/展开）
     versionListHtml += '<div style="border:1px solid ' + (isEnabled ? '#28a745' : '#ddd') + ';border-radius:4px;margin-bottom:10px;background:' + (isEnabled ? '#f0fff4' : '#fff') + '">';
@@ -1731,9 +1736,12 @@ async function deleteOverrideVersionInModal(path, versionId) {
     if (container) container.remove();
     // 重新打开版本管理弹窗
     openOverrideVersionModal(path, versions);
+    // 刷新列表显示
+    renderOverrides();
   } else {
-    // 如果没有版本了，关闭弹窗
+    // 如果没有版本了，关闭弹窗并刷新列表
     closeOverrideVersionModal();
+    renderOverrides();
   }
 }
 

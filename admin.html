@@ -424,10 +424,9 @@
       <div class="modal-body">
         <div style="margin-bottom:15px">
           <label style="display:block;margin-bottom:5px">选择文件夹:</label>
-          <div style="display:flex;gap:10px">
-            <input type="text" id="localFolderInput" style="flex:1;padding:6px 10px" placeholder="输入路径或选择文件夹">
-            <button class="btn btn-sm btn-info" onclick="chooseLocalFolderInModal()">选择文件夹</button>
-          </div>
+          <select id="localFolderInput" style="width:100%;padding:6px 10px">
+            <option value="">-- 请选择文件夹 --</option>
+          </select>
         </div>
         <div style="margin-bottom:15px;display:flex;gap:20px;align-items:center">
           <label>优先级: <input type="number" id="localFolderPriority" value="0" style="width:60px"></label>
