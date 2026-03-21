@@ -270,15 +270,26 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 .file-item.active { background: #e3f2fd; }
 .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
 .modal.active { display: flex; align-items: center; justify-content: center; }
-.modal-content { background: #fff; border-radius: 8px; width: 900px; max-width: 95%; max-height: 90%; display: flex; flex-direction: column; }
+.modal-content { background: #fff; border-radius: 8px; width: 1100px; max-width: 95%; max-height: 90%; display: flex; flex-direction: column; }
 .modal-header { padding: 15px 20px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
 .modal-header h3 { margin: 0; font-size: 16px; }
-.modal-body { padding: 20px; flex: 1; overflow: auto; }
+.modal-body { padding: 15px 20px; flex: 1; overflow: auto; }
 .modal-footer { padding: 15px 20px; border-top: 1px solid #ddd; display: flex; gap: 10px; justify-content: flex-end; }
 .json-editor { width: 100%; height: 350px; font-family: monospace; font-size: 12px; border: 1px solid #ddd; border-radius: 4px; padding: 10px; resize: vertical; }
 .json-error { color: #dc3545; font-size: 12px; margin-top: 5px; }
 .test-result { margin-top: 15px; padding: 12px; background: #f8f9fa; border-radius: 4px; }
 .test-result .detail-tabs { margin-top: 10px; }
+
+/* 路径提示样式 */
+#modalConditionsDiv code {
+  background: #fff;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: #d63384;
+  border: 1px solid #f8d7da;
+}
 
 .override-item.disabled, .mapping-item.disabled { opacity: 0.5; }
 .override-item .priority, .mapping-item .priority { background: #6c757d; color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 10px; }
@@ -293,18 +304,25 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 .version-panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .version-panel-title { font-weight: 600; font-size: 12px; color: #495057; }
 .version-panel-sub { font-size: 11px; color: #6c757d; }
-.version-editor-banner { margin: 10px 0 8px; padding: 8px 10px; border-radius: 4px; background: #e7f1ff; border: 1px solid #c4d9ff; font-size: 12px; color: #084298; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.version-editor-banner { margin: 6px 0 6px; padding: 6px 10px; border-radius: 4px; background: #e7f1ff; border: 1px solid #c4d9ff; font-size: 12px; color: #084298; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .version-editor-title { font-weight: 600; font-size: 12px; color: #084298; }
 .version-remark-pill { display: inline-block; padding: 2px 6px; border-radius: 999px; background: #fff3cd; color: #856404; font-size: 11px; border: 1px solid #ffeeba; vertical-align: middle; }
 .version-context-tag { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #e2e3ff; color: #383dff; font-size: 11px; margin-left: 8px; }
 
 /* 版本管理时让 JSON 弹窗更宽，并采用左右布局（仅在实际编辑/新建时添加 version-layout 类） */
-#jsonModal.version-layout .modal-content { max-width: 1200px; }
+#jsonModal.version-layout .modal-content { max-width: 1400px; }
 #jsonModal.version-layout .modal-body {
   display: grid;
   grid-template-columns: 1.1fr 1.6fr;
   grid-column-gap: 12px;
-  align-items: flex-start;
+  align-items: start;
+}
+
+/* 命中版本的高亮样式 */
+.version-highlighted {
+  box-shadow: 0 0 15px rgba(40, 167, 69, 0.6) !important;
+  border: 2px solid #28a745 !important;
+  transition: all 0.3s ease;
 }
 #jsonModal.version-layout #modalPath {
   grid-column: 1;
@@ -313,11 +331,13 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 }
 #jsonModal.version-layout #versionListContainer {
   grid-column: 1;
-  grid-row: 2 / 6;
+  grid-row: 2 / 20;
+  align-self: start;
 }
 #jsonModal.version-layout #modalPriorityDiv,
 #jsonModal.version-layout #modalRemarkDiv,
 #jsonModal.version-layout #modalConditionsDiv,
+#jsonModal.version-layout #modalRequestBodyDiv,
 #jsonModal.version-layout #versionEditorBanner,
 #jsonModal.version-layout #jsonEditor,
 #jsonModal.version-layout #jsonError {

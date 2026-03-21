@@ -1016,7 +1016,7 @@ function confirmResolve(result) {
 // ========== JSON Editor Modal ==========
 let currentModalPath = '';
 
-function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '', showConditions = false, currentConditions = [], currentConditionLogic = 'and', currentDelay = 0) {
+function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '', showConditions = false, currentConditions = [], currentConditionLogic = 'and', currentDelay = 0, requestBody = null) {
   const titleEl = document.getElementById('modalTitle');
   const pathEl = document.getElementById('modalPath');
   const editorEl = document.getElementById('jsonEditor');
@@ -1099,6 +1099,25 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
     }
   }
 
+  // 显示/隐藏请求Body
+  const requestBodyDiv = document.getElementById('modalRequestBodyDiv');
+  const requestBodyPre = document.getElementById('modalRequestBody');
+  if (requestBodyDiv && requestBodyPre) {
+    if (requestBody) {
+      requestBodyDiv.style.display = 'block';
+      let formattedBody = requestBody;
+      try {
+        formattedBody = JSON.stringify(JSON.parse(requestBody), null, 2);
+      } catch {}
+      requestBodyPre.textContent = formattedBody;
+      // 保存到全局变量，供复制功能使用
+      window.currentModalRequestBody = formattedBody;
+    } else {
+      requestBodyDiv.style.display = 'none';
+      window.currentModalRequestBody = null;
+    }
+  }
+
   const modal = document.getElementById('jsonModal');
   if (modal) {
     modal.classList.add('active');
@@ -1165,6 +1184,24 @@ function getModalConditions() {
     op: row.querySelector('.cond-op').value,
     value: row.querySelector('.cond-value').value.trim()
   })).filter(c => c.key);
+}
+
+// 复制请求Body到编辑器
+function copyRequestBodyToEditor() {
+  const editor = document.getElementById('jsonEditor');
+  const requestBody = window.currentModalRequestBody;
+  if (editor && requestBody) {
+    editor.value = requestBody;
+    // 可选：显示提示
+    const btn = event.target;
+    const originalText = btn.textContent;
+    btn.textContent = '已复制';
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }, 1000);
+  }
 }
 
 
@@ -1701,6 +1738,52 @@ function toggleVersionAccordion(versionKey) {
   }
 }
 
+// 打开临时修改弹窗并高亮指定版本
+function openOverrideModalAndHighlight(path, versionIndex) {
+  const versions = overrides[path] || [];
+  if (versions.length === 0) {
+    alert('该路径没有临时修改版本');
+    return;
+  }
+  
+  if (versionIndex < 0 || versionIndex >= versions.length) {
+    alert('版本索引无效');
+    return;
+  }
+  
+  // 打开版本管理弹窗
+  openOverrideVersionModal(path, versions);
+  
+  // 延迟执行高亮和滚动，确保DOM已渲染
+  setTimeout(() => {
+    const version = versions[versionIndex];
+    const versionKey = 'version_' + version.id;
+    
+    // 展开目标版本
+    const content = document.getElementById(versionKey + '_content');
+    const arrow = document.getElementById(versionKey + '_arrow');
+    if (content && arrow) {
+      content.style.display = 'block';
+      arrow.style.transform = 'rotate(90deg)';
+    }
+    
+    // 高亮目标版本（持续显示）
+    const versionElement = content ? content.parentElement : null;
+    if (versionElement) {
+      // 先移除所有版本的高亮
+      document.querySelectorAll('.version-highlighted').forEach(el => {
+        el.classList.remove('version-highlighted');
+      });
+      
+      // 添加高亮CSS类（持续显示，不自动移除）
+      versionElement.classList.add('version-highlighted');
+      
+      // 滚动到目标版本
+      versionElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, 100);
+}
+
 // 选择版本（单选）
 async function toggleOverrideVersionInModal(path, versionId, enabled) {
   await fetch('/admin/overrides', { 
@@ -1762,6 +1845,10 @@ function resetOverrideVersionModalView() {
 }
 
 function closeOverrideVersionModal() {
+  // 清除所有版本的高亮
+  document.querySelectorAll('.version-highlighted').forEach(el => {
+    el.classList.remove('version-highlighted');
+  });
   resetOverrideVersionModalView();
   closeModal();
 }
@@ -1874,7 +1961,7 @@ function createNewOverrideVersion(path) {
   }
 }
 
-async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false, initialConditions = []) {
+async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false, initialConditions = [], requestBody = null) {
   const versions = overrides[path] || [];
 
   // 如果有已有版本，且没有初始条件（正常点击列表的修改），只展示列表面板
@@ -1931,7 +2018,7 @@ async function setTempOverride(path, originalContent, showFileActions = false, f
     await loadOverrides();
 
     if (activeLogId !== null) showLogDetail(activeLogId);
-  }, showFileActions, true, currentPriority, currentRemark, false, showFileActions ? '保存' : '临时保存', true, initialConditions, 'and', 0);
+  }, showFileActions, true, currentPriority, currentRemark, false, showFileActions ? '保存' : '临时保存', true, initialConditions, 'and', 0, requestBody);
 
   let banner = document.getElementById('versionEditorBanner');
   if (!banner && editor) {
@@ -2852,9 +2939,37 @@ function showLogDetail(logId) {
     window.currentLogResponse = mr.body;
     window.currentLogResHeaders = mr.headers;
 
+    // 生成匹配条件信息的 HTML
+    let matchInfoHtml = '';
+    if (mr.matchInfo) {
+      const mi = mr.matchInfo;
+      // 版本名称可点击，点击后打开临时修改弹窗并高亮该版本
+      const versionNameHtml = '<a href="javascript:void(0)" onclick="openOverrideModalAndHighlight(\'' + 
+        l.path.replace(/'/g, "\\'") + '\', ' + mi.versionIndex + ')" style="color:#007bff;text-decoration:underline;cursor:pointer" title="点击编辑此版本">' + 
+        escapeHtml(mi.versionName) + '</a>';
+      
+      matchInfoHtml = '<div class="section-title">临时修改匹配信息</div><div class="detail-content"><table>' +
+        '<tr><td>版本名称</td><td>' + versionNameHtml + '</td></tr>' +
+        '<tr><td>匹配类型</td><td>' + (mi.hasConditions ? '<span class="badge badge-success">条件匹配</span>' : '<span class="badge badge-secondary">无条件（兜底）</span>') + '</td></tr>';
+      
+      if (mi.hasConditions && mi.conditions && mi.conditions.length > 0) {
+        const conditionLogic = mi.conditionLogic === 'or' ? '或' : '且';
+        matchInfoHtml += '<tr><td>条件逻辑</td><td>' + conditionLogic + '</td></tr>';
+        matchInfoHtml += '<tr><td>匹配条件</td><td><ul style="margin:0;padding-left:20px">';
+        mi.conditions.forEach(c => {
+          const opText = { eq: '等于', neq: '不等于', contains: '包含', exists: '存在' }[c.op] || c.op;
+          matchInfoHtml += '<li><code>' + escapeHtml(c.source) + '.' + escapeHtml(c.key) + '</code> ' + opText + ' <code>' + escapeHtml(c.value || '') + '</code></li>';
+        });
+        matchInfoHtml += '</ul></td></tr>';
+      }
+      
+      matchInfoHtml += '</table></div>';
+    }
+
     localDetailHtml =
       '<div class="section-title">Response</div>' +
       '<div class="detail-content">' + responseContentHtml + '</div>' +
+      matchInfoHtml +
       (hasReqBody ? '<div class="section-title">Request Body</div><div class="detail-content"><pre>' + escapeHtml(reqBodyFormatted) + '</pre></div>' : '') +
       '<div class="section-title">Request</div>' +
       '<div class="detail-content"><table>' +
@@ -3006,6 +3121,8 @@ function editLogOverride(path, isLocalFile = false, logId) {
   let initialContent = window.currentLogResponse || '{}';
   let force = false;
   let initialConditions = [];
+  let requestBody = null;
+  
   if (logId !== undefined) {
     const l = logs.find(log => log.id === logId);
     if (l) {
@@ -3013,6 +3130,11 @@ function editLogOverride(path, isLocalFile = false, logId) {
       if (body !== undefined && body !== null && body !== '') {
         initialContent = body;
         force = true;
+      }
+
+      // 保存请求body（如果是POST请求且有body）
+      if (l.method === 'POST' && l.body) {
+        requestBody = l.body;
       }
 
       // 提取 query 参数
@@ -3037,7 +3159,7 @@ function editLogOverride(path, isLocalFile = false, logId) {
       }
     }
   }
-  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force, initialConditions); }, 100);
+  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force, initialConditions, requestBody); }, 100);
 }
 
 async function removeOverrideAndRefreshLog(path) {

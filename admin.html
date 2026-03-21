@@ -267,21 +267,21 @@
         <button class="btn btn-sm btn-secondary" onclick="closeModal()">&times;</button>
       </div>
       <div class="modal-body">
-        <div style="margin-bottom:10px;font-family:monospace;font-size:12px;color:#666" id="modalPath"></div>
-        <div id="modalFolderDiv" style="display:none;margin-bottom:10px;align-items:center;gap:10px">
+        <div style="margin-bottom:6px;font-family:monospace;font-size:12px;color:#666" id="modalPath"></div>
+        <div id="modalFolderDiv" style="display:none;margin-bottom:6px;align-items:center;gap:10px">
           <label style="display:flex;align-items:center;gap:5px">
             <span style="font-size:12px;color:#666">保存到文件夹:</span>
             <select id="modalFolderSelect" style="padding:4px 8px;font-size:12px" onchange="handleModalFolderChange()"></select>
           </label>
         </div>
-        <div id="modalPriorityDiv" style="display:none;margin-bottom:10px;align-items:center;gap:10px">
+        <div id="modalPriorityDiv" style="display:none;margin-bottom:6px;align-items:center;gap:10px">
           <label style="display:flex;align-items:center;gap:5px">
             <span style="font-size:12px;color:#666">优先级:</span>
             <input type="number" id="modalPriority" value="1" style="width:60px;padding:4px 8px;font-size:12px">
             <span style="font-size:11px;color:#999">(数字越大优先级越高，本地文件=0)</span>
           </label>
         </div>
-        <div id="modalRemarkDiv" style="display:none;margin-bottom:10px">
+        <div id="modalRemarkDiv" style="display:none;margin-bottom:6px">
           <div style="display:flex;align-items:center;gap:10px">
             <label style="display:flex;align-items:center;gap:5px;flex:1">
               <span style="font-size:12px;color:#666">备注:</span>
@@ -294,8 +294,15 @@
             </label>
           </div>
         </div>
-        <div id="modalConditionsDiv" style="display:none;margin-bottom:10px">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div id="modalRequestBodyDiv" style="display:none;margin-bottom:6px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:11px;color:#666;font-weight:600">当前请求 Body</span>
+            <button class="btn btn-sm btn-secondary" onclick="copyRequestBodyToEditor()" style="font-size:10px;padding:2px 6px">复制到编辑器</button>
+          </div>
+          <pre id="modalRequestBody" style="background:#f8f9fa;padding:6px;border:1px solid #dee2e6;border-radius:4px;font-size:11px;max-height:120px;overflow:auto;margin:0"></pre>
+        </div>
+        <div id="modalConditionsDiv" style="display:none;margin-bottom:6px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
             <div>
               <span style="font-size:12px;color:#666;font-weight:600">参数条件匹配</span>
               <label class="switch">
@@ -306,7 +313,14 @@
             </div>
             <button class="btn btn-sm btn-secondary" onclick="addConditionRow()" style="font-size:11px;padding:2px 8px">+ 添加条件</button>
           </div>
-          <div id="modalConditionsList" style="display:flex;flex-direction:column;gap:6px"></div>
+          <div style="font-size:11px;color:#17a2b8;background:#e7f9ff;padding:6px 8px;border-radius:4px;margin-bottom:6px;border-left:3px solid #17a2b8">
+            <strong>支持路径格式：</strong><br>
+            • 简单键: <code>name</code><br>
+            • 嵌套对象: <code>user.name</code>, <code>data.user.email</code><br>
+            • 数组索引: <code>items[0]</code>, <code>items[0].id</code><br>
+            • 数组通配符: <code>items[*].id</code> (匹配所有元素的id)
+          </div>
+          <div id="modalConditionsList" style="display:flex;flex-direction:column;gap:4px"></div>
           <div style="font-size:11px;color:#aaa;margin-top:4px">无条件时作为默认兜底版本</div>
         </div>
         <textarea class="json-editor" id="jsonEditor"></textarea>
