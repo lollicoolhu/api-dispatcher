@@ -45,6 +45,8 @@ Promise.all([
   loadLocalFolders(false),
   loadPathDelays(false)
 ]).then(() => {
+  // 加载 Cookie Tab 自定义标签
+  loadCookieTabLabels();
   // 所有数据加载完成后，统一渲染
   renderGlobalServers();
   renderLocalFolders();
@@ -1016,7 +1018,7 @@ function confirmResolve(result) {
 // ========== JSON Editor Modal ==========
 let currentModalPath = '';
 
-function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '', showConditions = false, currentConditions = [], currentConditionLogic = 'and', currentDelay = 0, requestBody = null) {
+function openModal(title, path, content, onSave, showFileActions = false, showPriority = false, currentPriority = 1, currentRemark = '', showFolderSelect = false, saveBtnText = '', showConditions = false, currentConditions = [], currentConditionLogic = 'and', currentDelay = 0, requestBody = null, requestHeaders = null, requestCookies = null) {
   const titleEl = document.getElementById('modalTitle');
   const pathEl = document.getElementById('modalPath');
   const editorEl = document.getElementById('jsonEditor');
@@ -1118,6 +1120,48 @@ function openModal(title, path, content, onSave, showFileActions = false, showPr
     }
   }
 
+  // 显示/隐藏请求Headers
+  const requestHeaderDiv = document.getElementById('modalRequestHeaderDiv');
+  const requestHeaderTable = document.getElementById('modalRequestHeaderTable');
+  if (requestHeaderDiv && requestHeaderTable) {
+    if (requestHeaders && Object.keys(requestHeaders).length > 0) {
+      requestHeaderDiv.style.display = 'block';
+      // 生成表格显示 headers
+      let tableHtml = '<table style="width:100%;border-collapse:collapse">';
+      Object.entries(requestHeaders).forEach(([key, value]) => {
+        tableHtml += '<tr style="border-bottom:1px solid #dee2e6">' +
+          '<td style="padding:4px 6px;font-weight:600;color:#495057;width:30%;word-break:break-word">' + escapeHtml(key) + '</td>' +
+          '<td style="padding:4px 6px;color:#6c757d;word-break:break-all">' + escapeHtml(String(value)) + '</td>' +
+          '</tr>';
+      });
+      tableHtml += '</table>';
+      requestHeaderTable.innerHTML = tableHtml;
+    } else {
+      requestHeaderDiv.style.display = 'none';
+    }
+  }
+
+  // 显示/隐藏请求Cookies
+  const requestCookieDiv = document.getElementById('modalRequestCookieDiv');
+  const requestCookieTable = document.getElementById('modalRequestCookieTable');
+  if (requestCookieDiv && requestCookieTable) {
+    if (requestCookies && Object.keys(requestCookies).length > 0) {
+      requestCookieDiv.style.display = 'block';
+      // 生成表格显示 cookies
+      let tableHtml = '<table style="width:100%;border-collapse:collapse">';
+      Object.entries(requestCookies).forEach(([key, value]) => {
+        tableHtml += '<tr style="border-bottom:1px solid #dee2e6">' +
+          '<td style="padding:4px 6px;font-weight:600;color:#495057;width:30%;word-break:break-word">' + escapeHtml(key) + '</td>' +
+          '<td style="padding:4px 6px;color:#6c757d;word-break:break-all">' + escapeHtml(String(value)) + '</td>' +
+          '</tr>';
+      });
+      tableHtml += '</table>';
+      requestCookieTable.innerHTML = tableHtml;
+    } else {
+      requestCookieDiv.style.display = 'none';
+    }
+  }
+
   const modal = document.getElementById('jsonModal');
   if (modal) {
     modal.classList.add('active');
@@ -1156,6 +1200,8 @@ function addConditionRow(c = {}) {
     '<select class="cond-source" style="font-size:12px;padding:3px 6px">' +
     '<option value="query"' + (c.source === 'query' || !c.source ? ' selected' : '') + '>Query</option>' +
     '<option value="body"' + (c.source === 'body' ? ' selected' : '') + '>Body</option>' +
+    '<option value="header"' + (c.source === 'header' ? ' selected' : '') + '>Header</option>' +
+    '<option value="cookie"' + (c.source === 'cookie' ? ' selected' : '') + '>Cookie</option>' +
     '</select>' +
     '<input class="cond-key" type="text" placeholder="参数名" value="' + escapeHtml(c.key || '') + '" style="flex:1;font-size:12px;padding:3px 6px">' +
     '<select class="cond-op" style="font-size:12px;padding:3px 6px">' +
@@ -1331,6 +1377,224 @@ function formatOverrideConditions(v) {
          tags.join(logicText) + '</span>';
 }
 
+// 全局变量：当前选中的 Cookie 分组 Tab
+let activeOverrideCookieTab = 'all';
+// Cookie Tab 自定义标签（存储在 localStorage）
+let cookieTabLabels = {};
+
+// 加载 Cookie Tab 自定义标签
+function loadCookieTabLabels() {
+  try {
+    const saved = localStorage.getItem('cookieTabLabels');
+    if (saved) {
+      cookieTabLabels = JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error('Failed to load cookie tab labels:', e);
+    cookieTabLabels = {};
+  }
+}
+
+// 保存 Cookie Tab 自定义标签
+function saveCookieTabLabels() {
+  try {
+    localStorage.setItem('cookieTabLabels', JSON.stringify(cookieTabLabels));
+  } catch (e) {
+    console.error('Failed to save cookie tab labels:', e);
+  }
+}
+
+// 获取 Cookie Tab 显示标签（自定义标签或默认后四位）
+function getCookieTabLabel(key, value) {
+  const fullLabel = `${key}=${value}`;
+  // 如果有自定义标签，使用自定义标签
+  if (cookieTabLabels[fullLabel]) {
+    return cookieTabLabels[fullLabel];
+  }
+  // 否则使用后四位
+  if (value && value.length > 4) {
+    return `${key}=...${value.slice(-4)}`;
+  }
+  return fullLabel;
+}
+
+// 设置 Cookie Tab 自定义标签
+function setCookieTabLabel(key, value, customLabel) {
+  const fullLabel = `${key}=${value}`;
+  if (customLabel && customLabel.trim()) {
+    cookieTabLabels[fullLabel] = customLabel.trim();
+  } else {
+    delete cookieTabLabels[fullLabel];
+  }
+  saveCookieTabLabels();
+  renderOverrides();
+}
+
+// 编辑 Cookie Tab（标签或值）
+function editCookieTabLabel(key, value) {
+  // 收集受影响的版本
+  const paths = Object.keys(overrides);
+  const affectedVersions = [];
+  
+  paths.forEach(p => {
+    const versions = overrides[p] || [];
+    versions.forEach(v => {
+      const cookieConditions = (v.conditions || []).filter(c => c.source === 'cookie');
+      cookieConditions.forEach(cc => {
+        if (cc.key === key && cc.value === value) {
+          affectedVersions.push({ path: p, version: v });
+        }
+      });
+    });
+  });
+  
+  // 打开编辑弹窗
+  openCookieTabEditModal(key, value, affectedVersions);
+}
+
+// 打开 Cookie Tab 编辑弹窗
+function openCookieTabEditModal(key, value, affectedVersions) {
+  const fullLabel = `${key}=${value}`;
+  const currentLabel = cookieTabLabels[fullLabel] || '';
+  const defaultLabel = value && value.length > 4 ? `${key}=...${value.slice(-4)}` : fullLabel;
+  
+  // 设置弹窗内容
+  document.getElementById('cookieEditFullLabel').textContent = fullLabel;
+  document.getElementById('cookieEditCount').textContent = affectedVersions.length;
+  
+  // 生成受影响版本列表
+  const listHtml = affectedVersions.map(({ path, version }) => {
+    const remark = version.remark || '未命名版本';
+    return '<div style="padding:4px 8px;background:#f8f9fa;border-radius:4px;margin-bottom:4px;font-size:12px">' +
+      '<strong>' + escapeHtml(path) + '</strong> - ' + escapeHtml(remark) +
+      '</div>';
+  }).join('');
+  document.getElementById('cookieEditList').innerHTML = listHtml;
+  
+  // 设置表单值
+  document.getElementById('cookieEditTabLabel').value = currentLabel;
+  document.getElementById('cookieEditTabLabelPlaceholder').textContent = defaultLabel;
+  document.getElementById('cookieEditKey').value = key;
+  document.getElementById('cookieEditOldValue').value = value;
+  document.getElementById('cookieEditNewValue').value = '';
+  
+  // 保存数据
+  window._cookieEditData = { key, value, affectedVersions };
+  
+  // 显示弹窗
+  document.getElementById('cookieTabEditModal').classList.add('active');
+}
+
+// 关闭 Cookie Tab 编辑弹窗
+function closeCookieTabEditModal() {
+  document.getElementById('cookieTabEditModal').classList.remove('active');
+  window._cookieEditData = null;
+}
+
+// 保存 Tab 标签
+function saveCookieTabLabel() {
+  const data = window._cookieEditData;
+  if (!data) return;
+  
+  const customLabel = document.getElementById('cookieEditTabLabel').value.trim();
+  setCookieTabLabel(data.key, data.value, customLabel);
+  closeCookieTabEditModal();
+}
+
+// 保存 Cookie 值
+async function saveCookieValue() {
+  const data = window._cookieEditData;
+  if (!data) return;
+  
+  const newValue = document.getElementById('cookieEditNewValue').value.trim();
+  
+  if (!newValue) {
+    alert('请输入新的 Cookie 值');
+    return;
+  }
+  
+  if (newValue === data.value) {
+    alert('新值与当前值相同，无需修改');
+    return;
+  }
+  
+  // 确认操作
+  const confirmed = await showConfirm(
+    `确定要将 ${data.affectedVersions.length} 个临时修改的 Cookie 条件\n从 ${data.key}=${data.value}\n改为 ${data.key}=${newValue} 吗？`,
+    '批量修改 Cookie 条件',
+    '确定'
+  );
+  
+  if (!confirmed) return;
+  
+  // 批量更新
+  for (const { path, version } of data.affectedVersions) {
+    const conditions = version.conditions || [];
+    const updatedConditions = conditions.map(c => {
+      if (c.source === 'cookie' && c.key === data.key && c.value === data.value) {
+        return { ...c, value: newValue };
+      }
+      return c;
+    });
+    
+    await fetch('/admin/overrides', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path,
+        versionId: version.id,
+        conditions: updatedConditions,
+        conditionLogic: version.conditionLogic
+      })
+    });
+  }
+  
+  // 重新加载并渲染
+  await loadOverrides();
+  renderOverrides();
+  closeCookieTabEditModal();
+  
+  alert(`成功批量修改 ${data.affectedVersions.length} 个临时修改的 Cookie 条件`);
+}
+
+// 批量编辑当前 Cookie 分组的所有临时修改
+function batchEditCookieGroup() {
+  if (activeOverrideCookieTab === 'all' || activeOverrideCookieTab === 'no-cookie') {
+    return;
+  }
+  
+  // 获取当前分组的所有路径和版本
+  const paths = Object.keys(overrides);
+  const affectedVersions = [];
+  
+  paths.forEach(p => {
+    const versions = overrides[p] || [];
+    versions.forEach(v => {
+      const cookieConditions = (v.conditions || []).filter(c => c.source === 'cookie');
+      cookieConditions.forEach(cc => {
+        const groupKey = `cookie:${cc.key}=${cc.value}`;
+        if (groupKey === activeOverrideCookieTab) {
+          affectedVersions.push({ path: p, version: v });
+        }
+      });
+    });
+  });
+  
+  if (affectedVersions.length === 0) {
+    alert('当前分组没有临时修改');
+    return;
+  }
+  
+  // 打开批量编辑弹窗
+  openBatchEditModal(affectedVersions);
+}
+
+// 切换 Cookie 分组 Tab
+function switchOverrideCookieTab(tabKey) {
+  activeOverrideCookieTab = tabKey;
+  renderOverrides();
+}
+
 function renderOverrides() {
   const list = document.getElementById('overrideList');
   const paths = Object.keys(overrides);
@@ -1343,8 +1607,115 @@ function renderOverrides() {
   document.getElementById('overrideCount').textContent = '';
   if (paths.length === 0) { list.innerHTML = '<em>无临时修改</em>'; return; }
 
-  list.innerHTML = paths.sort().map(p => {
+  // 收集所有 Cookie 条件分组
+  const cookieGroups = new Map(); // key: cookie条件描述, value: {label, paths: Set}
+  cookieGroups.set('all', { label: '全部', paths: new Set() });
+  cookieGroups.set('no-cookie', { label: '无Cookie条件', paths: new Set() });
+
+  paths.forEach(p => {
     const versions = overrides[p] || [];
+    cookieGroups.get('all').paths.add(p);
+    
+    let hasCookieCondition = false;
+    versions.forEach(v => {
+      const cookieConditions = (v.conditions || []).filter(c => c.source === 'cookie');
+      if (cookieConditions.length > 0) {
+        hasCookieCondition = true;
+        // 为每个 Cookie 条件创建分组
+        cookieConditions.forEach(cc => {
+          const groupKey = `cookie:${cc.key}=${cc.value}`;
+          const groupLabel = `${cc.key}=${cc.value}`;
+          if (!cookieGroups.has(groupKey)) {
+            cookieGroups.set(groupKey, { label: groupLabel, paths: new Set() });
+          }
+          cookieGroups.get(groupKey).paths.add(p);
+        });
+      }
+    });
+    
+    if (!hasCookieCondition) {
+      cookieGroups.get('no-cookie').paths.add(p);
+    }
+  });
+
+  // 移除空的分组
+  for (const [key, group] of cookieGroups.entries()) {
+    if (key !== 'all' && group.paths.size === 0) {
+      cookieGroups.delete(key);
+    }
+  }
+
+  // 渲染 Tab 导航（只在有多个分组时显示）
+  let tabsHtml = '';
+  if (cookieGroups.size > 2) { // 大于2表示除了"全部"和"无Cookie条件"还有其他分组
+    tabsHtml = '<div class="override-tabs" style="display:flex;gap:8px;margin-bottom:15px;border-bottom:2px solid #e9ecef;padding-bottom:0;overflow-x:auto">';
+    for (const [key, group] of cookieGroups.entries()) {
+      const isActive = activeOverrideCookieTab === key;
+      const count = group.paths.size;
+      
+      // 获取显示标签（自定义标签或默认后四位）
+      let displayLabel = group.label;
+      let canEdit = false;
+      let cookieKey = '', cookieValue = '';
+      if (key.startsWith('cookie:')) {
+        // 从 groupKey 中提取 key 和 value
+        const match = key.match(/^cookie:(.+?)=(.+)$/);
+        if (match) {
+          [, cookieKey, cookieValue] = match;
+          displayLabel = getCookieTabLabel(cookieKey, cookieValue);
+          canEdit = true;
+        }
+      }
+      
+      const editHandler = canEdit ? 
+        'ondblclick="event.stopPropagation(); editCookieTabLabel(\'' + cookieKey.replace(/'/g, "\\'") + '\', \'' + cookieValue.replace(/'/g, "\\'") + '\')" title="双击编辑"' : '';
+      
+      tabsHtml += '<button class="override-tab' + (isActive ? ' active' : '') + '" ' +
+        'onclick="switchOverrideCookieTab(\'' + key.replace(/'/g, "\\'") + '\')" ' +
+        editHandler + ' ' +
+        'style="padding:8px 16px;border:none;background:' + (isActive ? '#007bff' : 'transparent') + ';' +
+        'color:' + (isActive ? '#fff' : '#495057') + ';cursor:pointer;border-radius:4px 4px 0 0;' +
+        'font-size:13px;white-space:nowrap;transition:all 0.2s;' +
+        (isActive ? 'font-weight:600;' : '') + '">' +
+        escapeHtml(displayLabel) + ' <span style="opacity:0.7">(' + count + ')</span>' +
+        '</button>';
+    }
+    tabsHtml += '</div>';
+  }
+
+  // 根据当前选中的 Tab 过滤路径
+  let filteredPaths = paths;
+  if (activeOverrideCookieTab !== 'all' && cookieGroups.has(activeOverrideCookieTab)) {
+    filteredPaths = paths.filter(p => cookieGroups.get(activeOverrideCookieTab).paths.has(p));
+  }
+
+  list.innerHTML = tabsHtml + filteredPaths.sort().map(p => {
+    const allVersions = overrides[p] || [];
+    if (allVersions.length === 0) return '';
+    
+    // 根据当前 Tab 过滤版本
+    let versions = allVersions;
+    if (activeOverrideCookieTab !== 'all') {
+      if (activeOverrideCookieTab === 'no-cookie') {
+        // 只显示没有 Cookie 条件的版本
+        versions = allVersions.filter(v => {
+          const cookieConditions = (v.conditions || []).filter(c => c.source === 'cookie');
+          return cookieConditions.length === 0;
+        });
+      } else if (activeOverrideCookieTab.startsWith('cookie:')) {
+        // 只显示匹配当前 Cookie 条件的版本
+        const match = activeOverrideCookieTab.match(/^cookie:(.+?)=(.+)$/);
+        if (match) {
+          const [, targetKey, targetValue] = match;
+          versions = allVersions.filter(v => {
+            const cookieConditions = (v.conditions || []).filter(c => c.source === 'cookie');
+            return cookieConditions.some(cc => cc.key === targetKey && cc.value === targetValue);
+          });
+        }
+      }
+    }
+    
+    // 如果过滤后没有版本，不显示这个路径
     if (versions.length === 0) return '';
     
     // 计算唯一的条件集数量
@@ -1961,7 +2332,7 @@ function createNewOverrideVersion(path) {
   }
 }
 
-async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false, initialConditions = [], requestBody = null) {
+async function setTempOverride(path, originalContent, showFileActions = false, forceContent = false, initialConditions = [], requestBody = null, requestHeaders = null, requestCookies = null) {
   const versions = overrides[path] || [];
 
   // 如果有已有版本，且没有初始条件（正常点击列表的修改），只展示列表面板
@@ -2018,7 +2389,7 @@ async function setTempOverride(path, originalContent, showFileActions = false, f
     await loadOverrides();
 
     if (activeLogId !== null) showLogDetail(activeLogId);
-  }, showFileActions, true, currentPriority, currentRemark, false, showFileActions ? '保存' : '临时保存', true, initialConditions, 'and', 0, requestBody);
+  }, showFileActions, true, currentPriority, currentRemark, false, showFileActions ? '保存' : '临时保存', true, initialConditions, 'and', 0, requestBody, requestHeaders, requestCookies);
 
   let banner = document.getElementById('versionEditorBanner');
   if (!banner && editor) {
@@ -3122,6 +3493,8 @@ function editLogOverride(path, isLocalFile = false, logId) {
   let force = false;
   let initialConditions = [];
   let requestBody = null;
+  let requestHeaders = null;
+  let requestCookies = null;
   
   if (logId !== undefined) {
     const l = logs.find(log => log.id === logId);
@@ -3135,6 +3508,25 @@ function editLogOverride(path, isLocalFile = false, logId) {
       // 保存请求body（如果是POST请求且有body）
       if (l.method === 'POST' && l.body) {
         requestBody = l.body;
+      }
+
+      // 保存请求headers（默认不添加任何条件）
+      if (l.headers) {
+        requestHeaders = l.headers;
+        
+        // 解析 Cookie
+        const cookieHeader = l.headers.cookie || l.headers.Cookie || '';
+        if (cookieHeader) {
+          requestCookies = {};
+          cookieHeader.split(';').forEach(cookie => {
+            const parts = cookie.trim().split('=');
+            if (parts.length >= 2) {
+              const key = parts[0].trim();
+              const value = parts.slice(1).join('=').trim();
+              requestCookies[key] = value;
+            }
+          });
+        }
       }
 
       // 提取 query 参数
@@ -3159,7 +3551,7 @@ function editLogOverride(path, isLocalFile = false, logId) {
       }
     }
   }
-  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force, initialConditions, requestBody); }, 100);
+  setTimeout(() => { setTempOverride(path, initialContent, isLocalFile, force, initialConditions, requestBody, requestHeaders, requestCookies); }, 100);
 }
 
 async function removeOverrideAndRefreshLog(path) {

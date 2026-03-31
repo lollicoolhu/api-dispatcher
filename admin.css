@@ -336,8 +336,10 @@ input[type="text"], textarea { padding: 6px 10px; border: 1px solid #ddd; border
 }
 #jsonModal.version-layout #modalPriorityDiv,
 #jsonModal.version-layout #modalRemarkDiv,
-#jsonModal.version-layout #modalConditionsDiv,
 #jsonModal.version-layout #modalRequestBodyDiv,
+#jsonModal.version-layout #modalRequestHeaderDiv,
+#jsonModal.version-layout #modalRequestCookieDiv,
+#jsonModal.version-layout #modalConditionsDiv,
 #jsonModal.version-layout #versionEditorBanner,
 #jsonModal.version-layout #jsonEditor,
 #jsonModal.version-layout #jsonError {

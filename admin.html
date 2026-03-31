@@ -301,6 +301,18 @@
           </div>
           <pre id="modalRequestBody" style="background:#f8f9fa;padding:6px;border:1px solid #dee2e6;border-radius:4px;font-size:11px;max-height:120px;overflow:auto;margin:0"></pre>
         </div>
+        <div id="modalRequestHeaderDiv" style="display:none;margin-bottom:6px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:11px;color:#666;font-weight:600">当前请求 Headers</span>
+          </div>
+          <div id="modalRequestHeaderTable" style="background:#f8f9fa;padding:6px;border:1px solid #dee2e6;border-radius:4px;font-size:11px;max-height:150px;overflow:auto"></div>
+        </div>
+        <div id="modalRequestCookieDiv" style="display:none;margin-bottom:6px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:11px;color:#666;font-weight:600">当前请求 Cookies</span>
+          </div>
+          <div id="modalRequestCookieTable" style="background:#f8f9fa;padding:6px;border:1px solid #dee2e6;border-radius:4px;font-size:11px;max-height:150px;overflow:auto"></div>
+        </div>
         <div id="modalConditionsDiv" style="display:none;margin-bottom:6px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
             <div>
@@ -315,10 +327,12 @@
           </div>
           <div style="font-size:11px;color:#17a2b8;background:#e7f9ff;padding:6px 8px;border-radius:4px;margin-bottom:6px;border-left:3px solid #17a2b8">
             <strong>支持路径格式：</strong><br>
-            • 简单键: <code>name</code><br>
+            • 简单键: <code>name</code>, <code>authorization</code>, <code>sessionId</code><br>
             • 嵌套对象: <code>user.name</code>, <code>data.user.email</code><br>
             • 数组索引: <code>items[0]</code>, <code>items[0].id</code><br>
-            • 数组通配符: <code>items[*].id</code> (匹配所有元素的id)
+            • 数组通配符: <code>items[*].id</code> (匹配所有元素的id)<br>
+            • Header示例: <code>x-user-id</code>, <code>authorization</code><br>
+            • Cookie示例: <code>sessionId</code>, <code>userId</code>, <code>token</code>
           </div>
           <div id="modalConditionsList" style="display:flex;flex-direction:column;gap:4px"></div>
           <div style="font-size:11px;color:#aaa;margin-top:4px">无条件时作为默认兜底版本</div>
@@ -550,6 +564,72 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closePathDelayModal()">取消</button>
         <button class="btn btn-primary" onclick="savePathDelay()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cookie Tab Edit Modal -->
+  <div class="modal" id="cookieTabEditModal" style="z-index: 1050;">
+    <div class="modal-content" style="max-width:700px">
+      <div class="modal-header">
+        <h3>编辑 Cookie Tab</h3>
+        <button class="btn btn-sm btn-secondary" onclick="closeCookieTabEditModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom:15px;padding:10px;background:#e7f9ff;border-left:3px solid #17a2b8;border-radius:4px">
+          <strong>Cookie 条件：</strong>
+          <code id="cookieEditFullLabel" style="background:#f8f9fa;padding:2px 6px;border-radius:3px"></code>
+          <div style="margin-top:5px;font-size:12px;color:#0c5460">
+            影响 <span id="cookieEditCount">0</span> 个临时修改
+          </div>
+        </div>
+        
+        <div style="margin-bottom:15px;max-height:150px;overflow-y:auto;border:1px solid #ddd;border-radius:4px;padding:8px">
+          <div id="cookieEditList"></div>
+        </div>
+        
+        <!-- Tab 标签编辑 -->
+        <div style="margin-bottom:20px;padding:15px;background:#f8f9fa;border-radius:6px;border:1px solid #dee2e6">
+          <div style="margin-bottom:10px;font-weight:600;color:#495057">
+            <span style="background:#17a2b8;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;margin-right:6px">选项 1</span>
+            修改 Tab 显示标签
+          </div>
+          <div style="margin-bottom:10px">
+            <label style="display:block;margin-bottom:5px;font-size:13px;color:#666">自定义标签（留空使用默认）:</label>
+            <input type="text" id="cookieEditTabLabel" placeholder="例如: 测试账号A" style="width:100%;padding:8px;border:1px solid #ced4da;border-radius:4px">
+            <div style="margin-top:5px;font-size:12px;color:#6c757d">
+              默认显示: <code id="cookieEditTabLabelPlaceholder" style="background:#fff;padding:2px 4px;border-radius:3px"></code>
+            </div>
+          </div>
+          <button class="btn btn-sm btn-primary" onclick="saveCookieTabLabel()">保存标签</button>
+        </div>
+        
+        <!-- Cookie 值编辑 -->
+        <div style="padding:15px;background:#fff3cd;border-radius:6px;border:1px solid #ffc107">
+          <div style="margin-bottom:10px;font-weight:600;color:#856404">
+            <span style="background:#ffc107;color:#000;padding:2px 6px;border-radius:3px;font-size:11px;margin-right:6px">选项 2</span>
+            批量修改 Cookie 值
+          </div>
+          <div style="margin-bottom:10px">
+            <label style="display:block;margin-bottom:5px;font-size:13px;color:#856404">Cookie Key（只读）:</label>
+            <input type="text" id="cookieEditKey" readonly style="width:100%;padding:8px;border:1px solid #ffc107;border-radius:4px;background:#fffbf0;color:#856404">
+          </div>
+          <div style="margin-bottom:10px">
+            <label style="display:block;margin-bottom:5px;font-size:13px;color:#856404">当前 Cookie Value（只读）:</label>
+            <input type="text" id="cookieEditOldValue" readonly style="width:100%;padding:8px;border:1px solid #ffc107;border-radius:4px;background:#fffbf0;color:#856404">
+          </div>
+          <div style="margin-bottom:10px">
+            <label style="display:block;margin-bottom:5px;font-size:13px;color:#dc3545;font-weight:600">新的 Cookie Value:</label>
+            <input type="text" id="cookieEditNewValue" placeholder="输入新的 Cookie 值" style="width:100%;padding:8px;border:2px solid #ffc107;border-radius:4px">
+            <div style="margin-top:5px;font-size:12px;color:#856404">
+              将批量修改所有临时修改的 Cookie 条件值
+            </div>
+          </div>
+          <button class="btn btn-sm btn-warning" onclick="saveCookieValue()">批量修改值</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeCookieTabEditModal()">关闭</button>
       </div>
     </div>
   </div>
