@@ -27,7 +27,7 @@ req.on('end', () => {
 });
 ```
 
-### 2. 修复 JSON 解析逻辑（本次修复）
+### 2. 修复 JSON 解析逻辑（已完成）
 在 `processRequest()` 函数中，处理 Buffer 类型的 reqBody：
 ```javascript
 let bodyParams = {};
@@ -42,7 +42,21 @@ if (reqBody && reqBody.length > 0) {
 }
 ```
 
-### 3. 代理请求处理（已正确）
+### 3. 修复 Content-Length Header（本次修复）
+在 `handleProxyRequest()` 函数中，确保 Content-Length 与实际 Buffer 长度一致：
+```javascript
+// 如果有请求体，确保 Content-Length 正确
+if (reqBody && reqBody.length > 0) {
+  proxyHeaders['Content-Length'] = reqBody.length;
+}
+```
+
+这个修复很重要，因为：
+- 原始请求的 Content-Length 可能与我们收集的 Buffer 长度不匹配
+- 如果 Content-Length 不正确，目标服务器可能会拒绝请求或读取不完整的数据
+- 对于 multipart/form-data（文件上传），Content-Length 必须精确匹配
+
+### 4. 代理请求处理（已正确）
 在 `handleProxyRequest()` 函数中，Buffer 类型的 reqBody 可以直接写入代理请求：
 ```javascript
 if (reqBody) {
@@ -63,9 +77,12 @@ if (reqBody) {
 2. 测试图片上传（PNG、JPG、GIF）
 3. 测试文件上传（PDF、ZIP、Excel）
 4. 测试表单提交（带文件上传）
+5. 测试大文件上传（验证 Content-Length 正确性）
 
 ## 修改文件
 - `lib/request-handler.js`
   - `handleRequest()`: 使用 Buffer 数组收集请求体
   - `processRequest()`: 修复 JSON 解析，支持 Buffer 类型
-  - `handleProxyRequest()`: Buffer 直接写入代理请求（无需修改）
+  - `handleProxyRequest()`: 
+    - 修复 Content-Length header 确保与 Buffer 长度一致
+    - Buffer 直接写入代理请求
